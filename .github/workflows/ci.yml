@@ -29,4 +29,5 @@ jobs:
             -o "$RUNNER_TEMP/cync-helper" \
             -framework Cocoa -framework CoreBluetooth -framework Security
       - name: Run crypto self-test
-        run: "$RUNNER_TEMP/cync-helper" --crypto-self-test
+        run: |
+          "$RUNNER_TEMP/cync-helper" --crypto-self-test
