@@ -1,0 +1,15 @@
+cync-cli
+Copyright 2026 cync-cli contributors
+
+Distributed under the Apache License, Version 2.0. See LICENSE.
+
+The native Telink encryption, pairing, and bulb protocol implementation is
+adapted from google/python-dimond and google/python-laurel:
+Copyright 2018 Google LLC
+Copyright 2016 Matthew Garrett
+Licensed under the Apache License, Version 2.0.
+https://github.com/google/python-dimond
+https://github.com/google/python-laurel
+
+This project is independent and is not affiliated with or endorsed by
+Cync or GE Lighting.
