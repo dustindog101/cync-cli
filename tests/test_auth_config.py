@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import contextlib
+import io
 import os
 import re
 import tempfile
@@ -43,6 +45,13 @@ class ConfigTests(unittest.TestCase):
 
 
 class AuthTests(unittest.TestCase):
+    def test_login_prompt_preserves_json_stdout(self) -> None:
+        out, err = io.StringIO(), io.StringIO()
+        with patch("builtins.input", return_value="person@example.test"), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(auth._interactive_email(None, True), "person@example.test")
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(err.getvalue(), "Cync email: ")
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

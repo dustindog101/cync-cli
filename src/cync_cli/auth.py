@@ -12,6 +12,7 @@ import json
 import re
 import secrets
 import string
+import sys
 import urllib.parse as urlparse
 import urllib.error
 import urllib.request
@@ -193,7 +194,8 @@ def _device_records(meshes: Any, token: str, transport: Transport | None) -> lis
 def _interactive_email(email: str | None, prompt: bool) -> str:
     if prompt:
         if not email:
-            email = input("Cync email: ").strip()
+            print("Cync email: ", end="", file=sys.stderr, flush=True)
+            email = input().strip()
     if not email or "\n" in email or "\r" in email:
         raise AuthError("A valid Cync email is required")
     return email
