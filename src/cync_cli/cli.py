@@ -9,7 +9,7 @@ import time
 from typing import Any
 
 from . import auth, backend, config
-from .colors import format_rgb, parse_percent, parse_rgb
+from .colors import NAMED_COLORS, format_rgb, parse_percent, parse_rgb
 from . import scenes as scene_store
 
 
@@ -37,19 +37,44 @@ class CLIArgumentParser(argparse.ArgumentParser):
             print(json.dumps({"schema_version": 1, "ok": False, "command": command,
                               "error": {"code": "invalid_input", "message": message}}, sort_keys=True))
             self.exit(2)
+        if self.prog == "cync" and "invalid choice" in message:
+            token = message.split("invalid choice:", 1)[1].split("(", 1)[0].strip()
+            self.exit(2, f"cync: unknown command or color {token}; try `cync red`, `cync 35`, or `cync --help`\n")
         super().error(message)
+
+    def format_help(self):
+        if getattr(self, "_concise_root_help", False):
+            return (
+                "usage: cync [COMMAND [ARGS...]] [--json] [--device NAME]\n\n"
+                "Control Cync lights with short commands.\n\n"
+                "Everyday commands:\n"
+                "  cync red [BRIGHTNESS]    Set a named or hex color\n"
+                "  cync 35                  Set brightness; 0 turns the light off\n"
+                "  cync on | off | status   Power and inspect the selected light\n"
+                "  cync fade 70 [SECONDS]   Fade to a brightness\n"
+                "  cync white [LEVEL]       Set white level (default 50)\n"
+                "  cync save NAME           Save the current scene\n"
+                "  cync scene NAME          Apply a saved scene\n"
+                "  cync lights              List paired lights\n"
+                "  cync use NAME|NUMBER     Select a light from its name or numbered list\n"
+                "  cync login               Import paired lights from your account\n\n"
+                "Examples: cync red 100 · cync '#33AAFF' · cync 35 · cync fade 70 8 · cync save Evening\n"
+                "More: toggle, scenes, brightness, color, rgb, set, info, scan, watch, doctor, test, disconnect, shutdown, devices, auth\n"
+                "Run `cync COMMAND --help` for advanced options.\n"
+            )
+        return super().format_help()
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = CLIArgumentParser(
         prog="cync",
         description="Control paired Cync Bluetooth lights locally from your Mac.",
-        epilog="Examples: cync on · cync brightness 35 · cync color blue · cync scene save Evening",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--json", action="store_true", help="print a stable JSON result")
     parser.add_argument("--device", help="device id or configured name (defaults to selected device)")
-    sub = parser.add_subparsers(dest="command", parser_class=CLIArgumentParser)
+    parser._concise_root_help = True
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND", parser_class=CLIArgumentParser)
 
     for name in ("status", "info", "on", "off", "toggle", "doctor", "disconnect", "shutdown"):
         _add_output_options(sub.add_parser(name, help={"status": "show the fresh light state", "info": "show device identity and fresh state", "on": "turn the light on", "off": "turn the light off", "toggle": "toggle the light", "doctor": "check local setup, Bluetooth, and helper availability", "disconnect": "release the active light connection for another controller", "shutdown": "stop the background Bluetooth helper"}[name]))
@@ -61,14 +86,17 @@ def build_parser() -> argparse.ArgumentParser:
     _add_output_options(p)
     p = sub.add_parser("color", help="set a named or hexadecimal RGB color")
     p.add_argument("value", help="name, #RRGGBB, or R,G,B")
+    p.add_argument("brightness", nargs="?", help="optional brightness from 0 to 100")
     _add_output_options(p)
     p = sub.add_parser("rgb", help="set red, green, and blue channels")
     p.add_argument("red"); p.add_argument("green"); p.add_argument("blue")
     _add_output_options(p)
     p = sub.add_parser("white", help="set tunable-white level from 0 to 100")
-    p.add_argument("percent")
+    p.add_argument("percent", nargs="?")
     _add_output_options(p)
     p = sub.add_parser("set", help="change multiple light settings in one command")
+    p.add_argument("color_value", nargs="?", help="optional named or hexadecimal color")
+    p.add_argument("brightness_value", nargs="?", help="optional brightness from 0 to 100")
     power = p.add_mutually_exclusive_group()
     power.add_argument("--on", dest="on", action="store_true", default=None)
     power.add_argument("--off", dest="off", action="store_true")
@@ -79,7 +107,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_output_options(p)
     p = sub.add_parser("fade", help="fade to a brightness over time")
     p.add_argument("brightness")
-    p.add_argument("--duration", required=True, type=_fade_duration, metavar="SECONDS")
+    p.add_argument("duration_pos", nargs="?", type=_fade_duration, metavar="SECONDS")
+    p.add_argument("--duration", dest="duration_flag", type=_fade_duration, metavar="SECONDS")
     _add_output_options(p)
     p = sub.add_parser("watch", help="print fresh state changes until interrupted")
     p.add_argument("--interval", type=_watch_interval, default=2.0, metavar="SECONDS")
@@ -111,6 +140,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = device_sub.add_parser("select", help="choose the default device")
     p.add_argument("selector")
     _add_output_options(p)
+    p = device_sub.add_parser("use", help="select a light by name or its numbered list position")
+    p.add_argument("selector")
+    _add_output_options(p)
     p = device_sub.add_parser("rename", help="rename a device profile")
     p.add_argument("selector"); p.add_argument("name")
     _add_output_options(p)
@@ -123,6 +155,75 @@ def build_parser() -> argparse.ArgumentParser:
     for name, help_text in (("login", "sign in and import paired bulb records"), ("status", "show safe authentication capability status"), ("import-legacy", "import saved credentials from the previous app"), ("forget", "remove the selected device's saved key")):
         _add_output_options(auth_sub.add_parser(name, help=help_text))
     return parser
+
+
+def _numeric_token(value: str) -> bool:
+    try:
+        float(value)
+        return True
+    except ValueError:
+        return False
+
+
+def _normalize_shortcuts(argv: list[str]) -> list[str]:
+    """Expand short everyday words before argparse validates the full CLI."""
+    args = list(argv)
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--device":
+            index += 2
+            continue
+        if token.startswith("--device=") or token == "--json" or token == "-h" or token == "--help":
+            index += 1
+            continue
+        break
+    if index >= len(args):
+        return args
+    token = args[index]
+    aliases = {
+        "lights": ["devices", "list"],
+        "scenes": ["scene", "list"],
+        "login": ["auth", "login"],
+        "save": ["scene", "save"],
+        "use": ["devices", "select"],
+    }
+    if token in aliases:
+        expanded = ["devices", "use"] if token == "use" else aliases[token]
+        return args[:index] + expanded + args[index + 1 :]
+    if token == "scene" and index + 1 < len(args) and args[index + 1] not in {"list", "save", "show", "apply", "delete"}:
+        return args[:index] + ["scene", "apply"] + args[index + 1 :]
+    known = {"status", "info", "on", "off", "toggle", "doctor", "disconnect", "shutdown", "scan", "brightness", "color", "rgb", "white", "set", "fade", "watch", "test", "scene", "devices", "auth"}
+    if token in known:
+        return args
+    # A numeric token is always a brightness shortcut, even when six digits
+    # could also be interpreted as a raw hexadecimal color.
+    if _numeric_token(token):
+        return args[:index] + ["brightness", token] + args[index + 1 :]
+    try:
+        parse_rgb(token)
+    except ValueError:
+        return args
+    tail = args[index + 1 :]
+    brightness_index = None
+    cursor = 0
+    while cursor < len(tail):
+        if tail[cursor] == "--device":
+            cursor += 2
+            continue
+        if tail[cursor] == "--json" or tail[cursor].startswith("--device="):
+            cursor += 1
+            continue
+        if _numeric_token(tail[cursor]):
+            brightness_index = cursor
+        break
+    if brightness_index is None:
+        expanded = ["set", "--on", "--color", token] + tail
+    else:
+        brightness = tail[brightness_index]
+        rest = tail[:brightness_index] + tail[brightness_index + 1 :]
+        expanded = ["set", "--color", token, "--brightness", brightness] + rest
+    return args[:index] + expanded
 
 
 def _add_output_options(parser: argparse.ArgumentParser) -> None:
@@ -235,22 +336,61 @@ def _control_args(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
         if command == "off": return "set", {"on": False}
         return "set", {"on": not bool(_status(args.device, auto_login=True).get("state", {}).get("on"))}
     if command == "brightness": return "set", {"brightness": parse_percent(args.percent, name="brightness")}
-    if command == "color": return "set", {"rgb": list(parse_rgb(args.value))}
+    if command == "color":
+        rgb = list(_parse_cli_color(args.value))
+        if args.brightness is None:
+            return "set", {"rgb": rgb}
+        brightness = parse_percent(args.brightness, name="brightness")
+        return "set", {"rgb": rgb, "brightness": brightness}
     if command == "rgb": return "set", {"rgb": list(parse_rgb(f"{args.red},{args.green},{args.blue}"))}
-    if command == "white": return "set", {"white": parse_percent(args.percent, name="white")}
+    if command == "white":
+        if args.percent is None:
+            return "set", {"white": 50, "on": True}
+        return "set", {"white": parse_percent(args.percent, name="white")}
     if command == "set":
         values: dict[str, Any] = {}
+        positional_color = getattr(args, "color_value", None)
+        positional_brightness = getattr(args, "brightness_value", None)
+        if positional_color is not None or positional_brightness is not None:
+            if args.color is not None or args.white is not None or args.brightness is not None or args.on is not None or args.off:
+                raise CLIError("invalid_input", "Use positional color/brightness or the --color/--white/--brightness flags, not both")
+            if positional_color is None:
+                raise CLIError("invalid_input", "A positional brightness shortcut needs a value; try `cync set 35`")
+            if _numeric_token(positional_color):
+                if positional_brightness is not None:
+                    raise CLIError("invalid_input", "A numeric value is brightness; add a color name before it")
+                values["brightness"] = parse_percent(positional_color, name="brightness")
+            else:
+                values["rgb"] = list(_parse_cli_color(positional_color))
+                if positional_brightness is not None:
+                    values["brightness"] = parse_percent(positional_brightness, name="brightness")
+            return "set", values
         if args.on is not None: values["on"] = True
         if args.off: values["on"] = False
         if args.brightness is not None: values["brightness"] = parse_percent(args.brightness, name="brightness")
-        if args.color is not None: values["rgb"] = list(parse_rgb(args.color))
+        if args.color is not None: values["rgb"] = list(_parse_cli_color(args.color))
         if args.white is not None: values["white"] = parse_percent(args.white, name="white")
         if not values: raise CLIError("invalid_input", "Choose at least one of --on, --off, --brightness, --color, or --white")
         if values.get("brightness") == 0 and values.get("on") is True:
             raise CLIError("invalid_input", "Brightness 0 turns the light off; remove --on")
         return "set", values
-    if command == "fade": return "fade", {"brightness": parse_percent(args.brightness, name="brightness"), "duration": args.duration}
+    if command == "fade":
+        positional = getattr(args, "duration_pos", None)
+        flag = getattr(args, "duration_flag", None)
+        if positional is not None and flag is not None:
+            raise CLIError("invalid_input", "Specify fade duration once: use a positional value or --duration")
+        duration = positional if positional is not None else flag if flag is not None else 2.0
+        return "fade", {"brightness": parse_percent(args.brightness, name="brightness"), "duration": duration}
     raise CLIError("invalid_command", f"Unsupported command {command}")
+
+
+def _parse_cli_color(value: str) -> tuple[int, int, int]:
+    if _numeric_token(value):
+        raise CLIError("invalid_input", "Numeric values are brightness; prefix hexadecimal colors with #")
+    try:
+        return parse_rgb(value)
+    except ValueError as exc:
+        raise CLIError("invalid_color", f"Unknown or invalid color {value!r}; try `cync red`, `cync '#33AAFF'`, or `cync 35`.") from exc
 
 
 def _status(selector: str | None, *, auto_login: bool = False) -> dict[str, Any]:
@@ -331,8 +471,16 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
         data = _config()
         if args.devices_command == "list": return _result("devices list", devices=data.get("devices", []), default=data.get("default"))
         try:
-            device = config.resolve_device(data, args.selector)
-            if args.devices_command == "select": config.select_default(device["id"]); return _result("devices select", selected=device["id"])
+            if args.devices_command == "use" and args.selector.isdecimal():
+                index = int(args.selector) - 1
+                if index < 0 or index >= len(data.get("devices", [])):
+                    raise CLIError("device_not_found", f"Light number must be from 1 to {len(data.get('devices', []))}")
+                device = data["devices"][index]
+            else:
+                device = config.resolve_device(data, args.selector)
+            if args.devices_command in {"select", "use"}:
+                config.select_default(device["id"])
+                return _result(f"devices {args.devices_command}", selected=device["id"], name=device.get("name"))
             if args.devices_command == "rename": config.update_device(device["id"], name=args.name); return _result("devices rename", device_id=device["id"], name=args.name)
             config.remove_device(device["id"]); return _result("devices remove", device_id=device["id"])
         except (KeyError, ValueError, LookupError) as exc: raise CLIError("device_not_found", str(exc)) from exc
@@ -410,8 +558,11 @@ def _human_state(result: dict[str, Any]) -> str:
     power = "on" if state.get("on") else "off"
     bits = [f"{name}: {power}"]
     if "brightness" in state: bits.append(f"{state['brightness']}%")
-    if state.get("color_mode") == "rgb" and isinstance(state.get("rgb"), list): bits.append(format_rgb(state["rgb"]))
-    elif state.get("color_mode") == "white" and "white" in state: bits.append(f"white {state['white']}%")
+    if state.get("color_mode") == "rgb" and isinstance(state.get("rgb"), list):
+        rgb = tuple(state["rgb"])
+        name = next((name for name, color in NAMED_COLORS.items() if color == rgb), None)
+        bits.append(name if name is not None else format_rgb(state["rgb"]))
+    elif state.get("color_mode") == "white" and "white" in state: bits.append(f"white (tone {state['white']})")
     return " · ".join(bits)
 
 
@@ -446,12 +597,24 @@ def _print_human(result: dict[str, Any]) -> None:
     elif command == "devices list":
         devices = result.get("devices", [])
         if not devices: print("No paired Cync devices. Run `cync auth login` to import your paired bulbs.")
-        for device in devices:
+        for index, device in enumerate(devices, start=1):
             marker = "*" if device.get("id") == result.get("default") else " "
-            print(f"{marker} {device.get('name', 'Unnamed')}  [{device.get('id')}]  node {device.get('node')}")
+            print(f"{marker} {index}. {device.get('name', 'Unnamed')}")
+    elif command in {"devices select", "devices use"}:
+        print(f"Using {result.get('name', 'selected light')}.")
+    elif command == "scene save":
+        print(f"Saved scene {result.get('scene', {}).get('name', '')!r}.")
+    elif command == "scene delete":
+        print(f"Deleted scene {result.get('name', '')!r}.")
     elif command == "scene list":
         if not result.get("scenes"): print("No saved scenes.")
-        for scene in result.get("scenes", []): print(f"{scene['name']}  →  {scene.get('device_id')}")
+        try:
+            names = {item["id"]: item["name"] for item in config.load_config().get("devices", [])}
+        except Exception:
+            names = {}
+        for scene in result.get("scenes", []):
+            light = names.get(scene.get("device_id"), "Unknown light")
+            print(f"{scene['name']}  ·  {light}")
     elif command == "scan":
         for item in result.get("devices", []):
             rssi = item.get("rssi")
@@ -488,14 +651,18 @@ def _command_name(args: argparse.Namespace) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    if (argv is None and len(sys.argv) == 1) or argv == []:
-        parser.print_help()
-        return 0
     try:
-        args = parser.parse_args(argv)
+        raw_argv = list(sys.argv[1:] if argv is None else argv)
+        args = parser.parse_args(_normalize_shortcuts(raw_argv))
         if not args.command:
-            parser.print_help()
-            return 0
+            data = _config()
+            if not data.get("devices"):
+                hint = "No paired lights yet. Run `cync login` to import your paired bulbs, or `cync --help` for command examples."
+                result = {"schema_version": 1, "ok": True, "command": "status", "devices": [], "hint": hint}
+                if args.json: print(json.dumps(result, sort_keys=True))
+                else: print(hint)
+                return 0
+            args.command = "status"
         result = dispatch(args)
         if args.command != "watch":
             if args.json: print(json.dumps(result, sort_keys=True))

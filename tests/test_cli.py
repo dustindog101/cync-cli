@@ -5,7 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -92,12 +92,130 @@ class CLITests(unittest.TestCase):
             with self.subTest(argv=argv):
                 self.assertEqual(parser.parse_args(argv).device, "Desk")
 
-    def test_no_arguments_shows_help_and_succeeds(self):
+    def test_no_arguments_with_no_devices_shows_onboarding_without_network_or_login(self):
         output = StringIO()
-        with redirect_stdout(output):
+        empty = {"schema_version": 1, "default": None, "devices": []}
+        with patch.object(cli.config, "load_config", return_value=empty), patch.object(cli.backend, "request") as request, patch.object(cli.auth, "login") as login, redirect_stdout(output):
             code = cli.main([])
         self.assertEqual(code, 0)
-        self.assertIn("usage: cync", output.getvalue())
+        self.assertIn("No paired lights yet", output.getvalue())
+        request.assert_not_called()
+        login.assert_not_called()
+
+    def test_no_arguments_with_configured_device_returns_status(self):
+        output = StringIO()
+        response = {"schema_version": 1, "ok": True, "verified": True, "state": BASE_STATE}
+        with patch.object(cli.config, "load_config", return_value={"schema_version": 1, "default": DEVICE["id"], "devices": [DEVICE]}), patch.object(cli.backend, "request", return_value=response) as request, redirect_stdout(output):
+            self.assertEqual(cli.main([]), 0)
+        request.assert_called_once()
+        self.assertIn("Desk: on", output.getvalue())
+
+    def test_root_help_is_short_but_command_help_keeps_advanced_flags(self):
+        root = cli.build_parser().format_help()
+        child = cli.build_parser()._subparsers._group_actions[0].choices["fade"].format_help()
+        self.assertIn("cync red [BRIGHTNESS]", root)
+        self.assertIn("cync use NAME|NUMBER", root)
+        self.assertIn("disconnect, shutdown", root)
+        self.assertNotIn("{status,info", root)
+        self.assertIn("--duration", child)
+        self.assertIn("SECONDS", child)
+
+    def test_shortcuts_match_full_command_forms(self):
+        cases = (
+            (["red"], ["set", "--on", "--color", "red"], ("set", {"rgb": [255, 0, 0], "on": True})),
+            (["red", "100"], ["set", "--color", "red", "--brightness", "100"], ("set", {"rgb": [255, 0, 0], "brightness": 100})),
+            (["#0000FF"], ["set", "--on", "--color", "#0000FF"], ("set", {"rgb": [0, 0, 255], "on": True})),
+            (["255,0,0"], ["set", "--on", "--color", "255,0,0"], ("set", {"rgb": [255, 0, 0], "on": True})),
+            (["color", "blue", "35"], ["color", "blue", "35"], ("set", {"rgb": [0, 0, 255], "brightness": 35})),
+            (["set", "red", "100"], ["set", "red", "100"], ("set", {"rgb": [255, 0, 0], "brightness": 100})),
+            (["35"], ["brightness", "35"], ("set", {"brightness": 35})),
+            (["0"], ["brightness", "0"], ("set", {"brightness": 0})),
+            (["123456"], ["brightness", "123456"], None),
+        )
+        parser = cli.build_parser()
+        for short, expanded, expected in cases:
+            with self.subTest(short=short):
+                short_args = parser.parse_args(cli._normalize_shortcuts(short))
+                full_args = parser.parse_args(expanded)
+                if expected is None:
+                    with self.assertRaises(ValueError): cli._control_args(short_args)
+                else:
+                    self.assertEqual(cli._control_args(short_args), expected)
+                    self.assertEqual(cli._control_args(full_args), expected)
+
+    def test_friendly_aliases_expand_to_existing_commands(self):
+        cases = {
+            ("lights",): ("devices", "list"),
+            ("use", "Bedroom"): ("devices", "use", "Bedroom"),
+            ("scenes",): ("scene", "list"),
+            ("save", "Evening"): ("scene", "save", "Evening"),
+            ("scene", "Evening"): ("scene", "apply", "Evening"),
+            ("login",): ("auth", "login"),
+        }
+        for short, expanded in cases.items():
+            with self.subTest(short=short):
+                self.assertEqual(tuple(cli._normalize_shortcuts(list(short))), expanded)
+
+    def test_white_and_fade_short_forms_and_compatibility(self):
+        parser = cli.build_parser()
+        self.assertEqual(cli._control_args(parser.parse_args(["white"])), ("set", {"white": 50, "on": True}))
+        self.assertEqual(cli._control_args(parser.parse_args(["white", "23"])), ("set", {"white": 23}))
+        self.assertEqual(cli._control_args(parser.parse_args(["fade", "70"])), ("fade", {"brightness": 70, "duration": 2.0}))
+        self.assertEqual(cli._control_args(parser.parse_args(["fade", "70", "8"])), ("fade", {"brightness": 70, "duration": 8.0}))
+        self.assertEqual(cli._control_args(parser.parse_args(["fade", "70", "--duration", "8"])), ("fade", {"brightness": 70, "duration": 8.0}))
+        both = parser.parse_args(["fade", "70", "8", "--duration", "9"])
+        with self.assertRaises(cli.CLIError): cli._control_args(both)
+
+    def test_invalid_color_and_conflict_do_not_call_backend(self):
+        for argv in (["color", "ultraviolet", "--json"], ["fade", "70", "8", "--duration", "9", "--json"], ["123456", "--json"]):
+            with self.subTest(argv=argv), patch.object(cli.backend, "request") as request:
+                output = StringIO()
+                with redirect_stdout(output):
+                    code = cli.main(list(argv))
+                self.assertEqual(code, 2)
+                result = json.loads(output.getvalue())
+                self.assertFalse(result["ok"])
+                request.assert_not_called()
+
+    def test_unknown_root_color_has_one_short_hint(self):
+        error = StringIO()
+        with redirect_stderr(error), self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(["gren"])
+        self.assertIn("try `cync red`", error.getvalue())
+        self.assertNotIn("usage:", error.getvalue())
+        self.assertNotIn("{status,info", error.getvalue())
+
+    def test_use_number_selects_exact_list_entry_and_rejects_invalid_index_before_write(self):
+        second = dict(DEVICE, id="light-2", name="Desk")
+        data = {"schema_version": 1, "default": DEVICE["id"], "devices": [DEVICE, second]}
+        with patch.object(cli.config, "load_config", return_value=data), patch.object(cli.config, "select_default") as select:
+            result = cli.dispatch(cli.build_parser().parse_args(cli._normalize_shortcuts(["use", "2"])))
+        select.assert_called_once_with(second["id"])
+        self.assertEqual(result["name"], "Desk")
+        with patch.object(cli.config, "load_config", return_value=data), patch.object(cli.config, "select_default") as select, self.assertRaises(cli.CLIError):
+            cli.dispatch(cli.build_parser().parse_args(cli._normalize_shortcuts(["use", "3"])))
+        select.assert_not_called()
+
+    def test_human_lists_use_names_numbers_and_exact_color_names_without_ids(self):
+        devices = [DEVICE, dict(DEVICE, id="light-2", name="Desk")]
+        output = StringIO()
+        with patch.object(cli.config, "load_config", return_value={"devices": devices}), redirect_stdout(output):
+            cli._print_human({"command": "devices list", "devices": devices, "default": "light-2"})
+        self.assertIn("1. Desk", output.getvalue())
+        self.assertIn("* 2. Desk", output.getvalue())
+        self.assertNotIn("light-2", output.getvalue())
+        output = StringIO()
+        with redirect_stdout(output):
+            cli._print_human({"command": "status", "device": {"name": "Desk"}, "state": dict(BASE_STATE, rgb=[0, 0, 255])})
+        self.assertIn("blue", output.getvalue())
+        self.assertNotIn("#0000FF", output.getvalue())
+
+    def test_scene_list_human_output_uses_friendly_light_name(self):
+        output = StringIO()
+        with patch.object(cli.config, "load_config", return_value={"devices": [DEVICE]}), redirect_stdout(output):
+            cli._print_human({"command": "scene list", "scenes": [{"name": "Evening", "device_id": DEVICE["id"]}]})
+        self.assertIn("Evening  ·  Desk", output.getvalue())
+        self.assertNotIn(DEVICE["id"], output.getvalue())
 
     def test_json_input_errors_are_enveloped_for_flags_on_either_side(self):
         for argv in (["--json", "brightness", "101"], ["brightness", "101", "--json"]):

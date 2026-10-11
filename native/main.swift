@@ -324,7 +324,7 @@ final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPer
                 guard let b=b as? Int,(0...100).contains(b) else { fail("INVALID_VALUE","Brightness must be 0–100."); return }
                 expected["brightness"]=b
                 if b>0 {
-                    if v["on"] as? Bool != false { packets.append((0xd0,[1])); expected["on"]=true }
+                    if v["on"] as? Bool != false { packets.insert((0xd0,[1]),at:0); expected["on"]=true }
                     packets.append((0xd2,[UInt8(b)]))
                 } else { packets.append((0xd0,[0])); expected["on"]=false }
             }
@@ -334,7 +334,8 @@ final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPer
                 if !on { expected.removeValue(forKey:"brightness") }
                 // Turning on after setting brightness restores the bulb's old
                 // level. The brightness branch already powers on first.
-                if !on || v["brightness"] == nil { packets.append((0xd0,[on ? 1:0])) }
+                if !on { packets.append((0xd0,[0])) }
+                else if v["brightness"] == nil { packets.insert((0xd0,[1]),at:0) }
             }
             guard !packets.isEmpty else { fail("INVALID_VALUE","No supported settings supplied."); return }
         }
