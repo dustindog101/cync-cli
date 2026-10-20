@@ -24,12 +24,15 @@ cync red 100           # red at full brightness; color shortcuts turn the light 
 cync 35                # set brightness; 0 turns the light off
 cync off
 cync fade 70 8         # fade to 70% over 8 seconds (default: 2 seconds)
+cync fade 70 5m        # fade to 70% over 5 minutes (up to 10 minutes)
 cync white             # tunable white, default level 50
 cync save evening
 cync scene evening
 cync lights            # list saved light profiles
 cync use 1             # choose a light by number or name
 ```
+
+`cync help` shows the command list, and `cync help fade` explains one command. Fade durations accept plain seconds (`8`), seconds (`30s`), or minutes (`5m`, `1.5m`).
 
 Commands use the last-selected light profile. `cync` with no arguments shows its status when a profile is configured, or a setup hint with a link to help when no light is paired. Use `cync login` for a fresh setup; control commands can prompt for setup when no profile is configured.
 

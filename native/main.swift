@@ -121,7 +121,7 @@ final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPer
     var servicesPending=0,seq=Int.random(in:1...0xfffffe),phase="",lastActivity=Date()
     var discovery=[String:[String:Any]](),infoValues=[String:String]()
     var deadline=Date.distantPast,verifyAfter=Double.greatestFiniteMagnitude
-    var fadeTimer:Timer?,pollTimer:Timer?
+    var fadeTimer:Timer?,pollTimer:Timer?,fadeActivity:NSObjectProtocol?
     var generation=0
     var jobID:String { job?["request_id"] as? String ?? "" }
     var node:Int { profile["node"] as? Int ?? 0 }
@@ -144,7 +144,9 @@ final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPer
         try? FileManager.default.removeItem(at:path)
         guard let object=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],let id=object["request_id"] as? String,UUID(uuidString:id) != nil else { return }
         generation+=1; job=object; expected=[:]; verifyAfter=Double.greatestFiniteMagnitude
-        deadline=Date().addingTimeInterval(min(120,max(1,object["timeout"] as? Double ?? 35)))
+        // The cap is a safety net only. The CLI sends duration+35 for a fade,
+        // so a 600s fade needs 635s of headroom for connect and verify.
+        deadline=Date().addingTimeInterval(min(700,max(1,object["timeout"] as? Double ?? 35)))
         lastActivity=Date(); handleJob()
     }
     func command() -> String { job?["command"] as? String ?? "" }
@@ -306,7 +308,7 @@ final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPer
         guard job != nil,ready else { return }
         let v=values()
         if command()=="fade" {
-            guard let b=v["brightness"] as? Int,(0...100).contains(b),let duration=v["duration"] as? Double,(0.2...60).contains(duration) else { fail("INVALID_VALUE","Fade requires brightness 0–100 and duration 0.2–60 seconds."); return }
+            guard let b=v["brightness"] as? Int,(0...100).contains(b),let duration=v["duration"] as? Double,(0.2...600).contains(duration) else { fail("INVALID_VALUE","Fade requires brightness 0–100 and duration 0.2–600 seconds (10 minutes)."); return }
             phase="fadeBaseline"; queryState(); return
         }
         var packets=[(UInt8,[UInt8])](); expected=[:]
@@ -350,7 +352,12 @@ final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPer
     func beginFade() {
         guard phase=="fadeBaseline",let desired=values()["brightness"] as? Int,let duration=values()["duration"] as? Double else { return }
         phase="fading"
-        let start=state["brightness"] as? Int ?? 0,steps=max(2,Int(duration/0.15)),id=jobID
+        // A long fade must keep running while the Mac is idle, so ask the
+        // system to defer App Nap and idle sleep until the ramp ends.
+        fadeActivity=ProcessInfo.processInfo.beginActivity(options:.userInitiated,reason:"Cync fade")
+        // Step count is capped so a long fade sends no more Bluetooth writes
+        // than a 60s fade does today. The ramp still takes exactly `duration`.
+        let start=state["brightness"] as? Int ?? 0,steps=max(2,min(400,Int(duration/0.15))),id=jobID
         if desired>0 && state["on"] as? Bool != true { _=send(0xd0,[1]) }
         var index=0
         fadeTimer=Timer.scheduledTimer(withTimeInterval:duration/Double(steps),repeats:true) { timer in
@@ -365,15 +372,18 @@ final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPer
         }
     }
     func after(_ delay:Double,_ callback:@escaping ()->Void) { DispatchQueue.main.asyncAfter(deadline:.now()+delay,execute:callback) }
+    func endFadeActivity() {
+        if let activity=fadeActivity { ProcessInfo.processInfo.endActivity(activity); fadeActivity=nil }
+    }
     func finish(_ extra:[String:Any]) {
         guard job != nil else { return }
         var result:[String:Any]=["schema_version":1,"request_id":jobID,"ok":true,"connected":ready]
         for (k,v) in extra { result[k]=v }
-        writeResponse(result); job=nil; expected=[:]; phase="idle"; lastActivity=Date()
+        writeResponse(result); job=nil; expected=[:]; phase="idle"; lastActivity=Date(); endFadeActivity()
     }
     func fail(_ code:String,_ message:String) {
         guard job != nil else { return }
-        let id=jobID; fadeTimer?.invalidate(); job=nil; expected=[:]; disconnect()
+        let id=jobID; fadeTimer?.invalidate(); endFadeActivity(); job=nil; expected=[:]; disconnect()
         writeResponse(["schema_version":1,"request_id":id,"ok":false,"verified":false,"connected":false,"error":["code":code,"message":message]])
     }
     func writeResponse(_ value:[String:Any]) {
@@ -383,7 +393,7 @@ final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPer
         try? FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:path.path)
     }
     func disconnect() {
-        fadeTimer?.invalidate(); fadeTimer=nil; central?.stopScan()
+        fadeTimer?.invalidate(); fadeTimer=nil; endFadeActivity(); central?.stopScan()
         queuedPeer=nil
         let old=peer; peer=nil
         if let p=old,p.state != .disconnected { disconnecting.insert(p.identifier); central?.cancelPeripheralConnection(p) }

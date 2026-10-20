@@ -51,7 +51,7 @@ class CLIArgumentParser(argparse.ArgumentParser):
                 "  cync red [BRIGHTNESS]    Set a named or hex color\n"
                 "  cync 35                  Set brightness; 0 turns the light off\n"
                 "  cync on | off | status   Power and inspect the selected light\n"
-                "  cync fade 70 [SECONDS]   Fade to a brightness\n"
+                "  cync fade 70 [TIME]      Fade to a brightness (up to 10 minutes)\n"
                 "  cync white [LEVEL]       Set white level (default 50)\n"
                 "  cync save NAME           Save the current scene\n"
                 "  cync scene NAME          Apply a saved scene\n"
@@ -60,7 +60,7 @@ class CLIArgumentParser(argparse.ArgumentParser):
                 "  cync login               Import paired lights from your account\n\n"
                 "Examples: cync red 100 · cync '#33AAFF' · cync 35 · cync fade 70 8 · cync save Evening\n"
                 "More: toggle, scenes, brightness, color, rgb, set, info, scan, watch, doctor, test, disconnect, shutdown, devices, auth\n"
-                "Run `cync COMMAND --help` for advanced options.\n"
+                "Run `cync help` or `cync COMMAND --help` for advanced options.\n"
             )
         return super().format_help()
 
@@ -107,12 +107,15 @@ def build_parser() -> argparse.ArgumentParser:
     _add_output_options(p)
     p = sub.add_parser("fade", help="fade to a brightness over time")
     p.add_argument("brightness")
-    p.add_argument("duration_pos", nargs="?", type=_fade_duration, metavar="SECONDS")
-    p.add_argument("--duration", dest="duration_flag", type=_fade_duration, metavar="SECONDS")
+    p.add_argument("duration_pos", nargs="?", type=_fade_duration, metavar="TIME")
+    p.add_argument("--duration", dest="duration_flag", type=_fade_duration, metavar="TIME")
     _add_output_options(p)
     p = sub.add_parser("watch", help="print fresh state changes until interrupted")
     p.add_argument("--interval", type=_watch_interval, default=2.0, metavar="SECONDS")
     p.add_argument("--count", type=_positive_count, metavar="POLL_COUNT", help="stop after this many polls (default: run until interrupted)")
+    _add_output_options(p)
+    p = sub.add_parser("help", help="show help for cync commands")
+    p.add_argument("help_command", nargs="?", metavar="COMMAND", help="command to describe")
     _add_output_options(p)
     p = sub.add_parser("test", help="run a bounded control check and restore the starting state")
     p.add_argument("--brightness", type=parse_percent, default=23)
@@ -165,6 +168,15 @@ def _numeric_token(value: str) -> bool:
         return False
 
 
+_ALIASES = {
+    "lights": ["devices", "list"],
+    "scenes": ["scene", "list"],
+    "login": ["auth", "login"],
+    "save": ["scene", "save"],
+    "use": ["devices", "select"],
+}
+
+
 def _normalize_shortcuts(argv: list[str]) -> list[str]:
     """Expand short everyday words before argparse validates the full CLI."""
     args = list(argv)
@@ -181,19 +193,12 @@ def _normalize_shortcuts(argv: list[str]) -> list[str]:
     if index >= len(args):
         return args
     token = args[index]
-    aliases = {
-        "lights": ["devices", "list"],
-        "scenes": ["scene", "list"],
-        "login": ["auth", "login"],
-        "save": ["scene", "save"],
-        "use": ["devices", "select"],
-    }
-    if token in aliases:
-        expanded = ["devices", "use"] if token == "use" else aliases[token]
+    if token in _ALIASES:
+        expanded = ["devices", "use"] if token == "use" else _ALIASES[token]
         return args[:index] + expanded + args[index + 1 :]
     if token == "scene" and index + 1 < len(args) and args[index + 1] not in {"list", "save", "show", "apply", "delete"}:
         return args[:index] + ["scene", "apply"] + args[index + 1 :]
-    known = {"status", "info", "on", "off", "toggle", "doctor", "disconnect", "shutdown", "scan", "brightness", "color", "rgb", "white", "set", "fade", "watch", "test", "scene", "devices", "auth"}
+    known = {"status", "info", "on", "off", "toggle", "doctor", "disconnect", "shutdown", "scan", "brightness", "color", "rgb", "white", "set", "fade", "watch", "test", "help", "scene", "devices", "auth"}
     if token in known:
         return args
     # A numeric token is always a brightness shortcut, even when six digits
@@ -226,6 +231,20 @@ def _normalize_shortcuts(argv: list[str]) -> list[str]:
     return args[:index] + expanded
 
 
+def _help_text(topic: str | None = None) -> str:
+    """Return the root help, or the help for one named command."""
+    parser = build_parser()
+    if not topic:
+        return parser.format_help()
+    # An alias such as "lights" points at a real command; describe that one.
+    name = _ALIASES.get(topic, [topic])[0]
+    action = next((a for a in parser._actions if isinstance(a, argparse._SubParsersAction)), None)
+    choices = getattr(action, "choices", {}) or {}
+    if name not in choices:
+        raise CLIError("invalid_command", f"Unknown command {topic!r}. Run `cync help` to list the commands.")
+    return choices[name].format_help()
+
+
 def _add_output_options(parser: argparse.ArgumentParser) -> None:
     # SUPPRESS preserves values supplied before the subcommand.
     parser.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="print a stable JSON result")
@@ -242,13 +261,22 @@ def _duration(value: str) -> int:
     return result
 
 
+_DURATION_UNITS = {"s": 1.0, "m": 60.0, "h": 3600.0}
+
+
 def _fade_duration(value: str) -> float:
+    """Read a fade duration in seconds. Accepts 8, 30s, 5m, or 1.5m."""
+    text = value.strip().lower()
+    multiplier = 1.0
+    if text and text[-1] in _DURATION_UNITS:
+        multiplier = _DURATION_UNITS[text[-1]]
+        text = text[:-1].strip()
     try:
-        result = float(value)
+        result = float(text) * multiplier
     except ValueError as exc:
-        raise argparse.ArgumentTypeError("fade duration must be from 0.2 to 60 seconds") from exc
-    if not 0.2 <= result <= 60:
-        raise argparse.ArgumentTypeError("fade duration must be from 0.2 to 60 seconds")
+        raise argparse.ArgumentTypeError("fade duration must be a number of seconds, or a value with s, m, or h, such as 8, 30s, 5m, or 1.5m") from exc
+    if not 0.2 <= result <= 600:
+        raise argparse.ArgumentTypeError("fade duration must be from 0.2 to 600 seconds (10 minutes)")
     return result
 
 
@@ -458,6 +486,8 @@ def _states_match(expected: Any, actual: Any) -> bool:
 
 def dispatch(args: argparse.Namespace) -> dict[str, Any]:
     command = args.command
+    if command == "help":
+        return _result("help", help=_help_text(getattr(args, "help_command", None)))
     if command == "auth":
         if args.auth_command == "login":
             devices = auth.login()
@@ -546,6 +576,9 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
         return _result(command, device=device, response=response)
     native_command, values = _control_args(args)
     device = _device(args.device, auto_login=True)
+    # A fade must hold the request open for the whole ramp, plus the connect
+    # and verify overhead. The helper caps its own deadline, so the two must
+    # grow together: helper cap 700s = 600s ramp + 35s overhead + 65s slack.
     timeout = values["duration"] + 35 if native_command == "fade" else 35
     response = _request(native_command, device, values, timeout=timeout)
     return _result(command, device=device, response=response, requested=values)
@@ -568,6 +601,9 @@ def _human_state(result: dict[str, Any]) -> str:
 
 def _print_human(result: dict[str, Any]) -> None:
     command = result.get("command", "")
+    if command == "help":
+        print(result.get("help", ""), end="")
+        return
     if "state" in result:
         print(_human_state(result))
         if command == "info" and isinstance(result.get("info"), dict):
