@@ -24,6 +24,7 @@ cync red 100           # red at full brightness; color shortcuts turn the light 
 cync 35                # set brightness; 0 turns the light off
 cync off
 cync fade 70 8         # fade to 70% over 8 seconds (default: 2 seconds)
+cync fade 70 1m        # fade to 70% over one minute
 cync fade 70 5m        # fade to 70% over 5 minutes (up to 10 minutes)
 cync white             # tunable white, default level 50
 cync save evening
@@ -33,6 +34,10 @@ cync use 1             # choose a light by number or name
 ```
 
 `cync help` shows the command list, and `cync help fade` explains one command. Fade durations accept plain seconds (`8`), seconds (`30s`), or minutes (`5m`, `1.5m`).
+
+Fades run on the Mac, which must stay in Bluetooth range. The command waits for
+the ramp and a fresh final readback. Ctrl-C stops the caller but can leave an
+accepted fade running in the helper. See [all commands and fade limits](docs/commands.md).
 
 Commands use the last-selected light profile. `cync` with no arguments shows its status when a profile is configured, or a setup hint with a link to help when no light is paired. Use `cync login` for a fresh setup; control commands can prompt for setup when no profile is configured.
 
@@ -47,8 +52,15 @@ Color shortcuts turn the light on; explicit `color` and `white LEVEL` commands p
 ```sh
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 python3 scripts/privacy_audit.py .
+python3 scripts/test_native.py  # macOS: native fade tests without Bluetooth
 ```
 
 Configuration and scenes live in `~/Library/Application Support/cync-cli`; `CYNC_HOME` overrides that location.
+
+Read [AGENTS.md](AGENTS.md) for agent instructions and
+[development and troubleshooting](docs/development.md) for architecture, native
+builds, installation updates, and live-test procedure. Stop the idle helper with
+`cync shutdown` before reinstalling; `./install.sh` refreshes the installed copy.
+The [fade review](docs/fade-review.md) records verified behavior and test limits.
 
 Apache-2.0. Protocol attribution and license details are in [NOTICE](NOTICE) and [LICENSE](LICENSE). Independent of GE Lighting and Cync.

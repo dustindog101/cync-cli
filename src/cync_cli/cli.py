@@ -107,8 +107,10 @@ def build_parser() -> argparse.ArgumentParser:
     _add_output_options(p)
     p = sub.add_parser("fade", help="fade to a brightness over time")
     p.add_argument("brightness")
-    p.add_argument("duration_pos", nargs="?", type=_fade_duration, metavar="TIME")
-    p.add_argument("--duration", dest="duration_flag", type=_fade_duration, metavar="TIME")
+    p.add_argument("duration_pos", nargs="?", type=_fade_duration, metavar="TIME",
+                   help="0.2–600 seconds; accepts 60, 60s, or 1m (default: 2 seconds)")
+    p.add_argument("--duration", dest="duration_flag", type=_fade_duration, metavar="TIME",
+                   help="same duration as TIME; specify only one")
     _add_output_options(p)
     p = sub.add_parser("watch", help="print fresh state changes until interrupted")
     p.add_argument("--interval", type=_watch_interval, default=2.0, metavar="SECONDS")
@@ -173,7 +175,7 @@ _ALIASES = {
     "scenes": ["scene", "list"],
     "login": ["auth", "login"],
     "save": ["scene", "save"],
-    "use": ["devices", "select"],
+    "use": ["devices", "use"],
 }
 
 
@@ -194,7 +196,7 @@ def _normalize_shortcuts(argv: list[str]) -> list[str]:
         return args
     token = args[index]
     if token in _ALIASES:
-        expanded = ["devices", "use"] if token == "use" else _ALIASES[token]
+        expanded = _ALIASES[token]
         return args[:index] + expanded + args[index + 1 :]
     if token == "scene" and index + 1 < len(args) and args[index + 1] not in {"list", "save", "show", "apply", "delete"}:
         return args[:index] + ["scene", "apply"] + args[index + 1 :]
@@ -237,12 +239,13 @@ def _help_text(topic: str | None = None) -> str:
     if not topic:
         return parser.format_help()
     # An alias such as "lights" points at a real command; describe that one.
-    name = _ALIASES.get(topic, [topic])[0]
-    action = next((a for a in parser._actions if isinstance(a, argparse._SubParsersAction)), None)
-    choices = getattr(action, "choices", {}) or {}
-    if name not in choices:
-        raise CLIError("invalid_command", f"Unknown command {topic!r}. Run `cync help` to list the commands.")
-    return choices[name].format_help()
+    for name in _ALIASES.get(topic, [topic]):
+        action = next((a for a in parser._actions if isinstance(a, argparse._SubParsersAction)), None)
+        choices = getattr(action, "choices", {}) or {}
+        if name not in choices:
+            raise CLIError("invalid_command", f"Unknown command {topic!r}. Run `cync help` to list the commands.")
+        parser = choices[name]
+    return parser.format_help()
 
 
 def _add_output_options(parser: argparse.ArgumentParser) -> None:

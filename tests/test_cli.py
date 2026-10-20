@@ -271,11 +271,11 @@ class CLITests(unittest.TestCase):
 
     def test_fade_duration_accepts_units_and_ten_minute_ceiling(self):
         parser = cli.build_parser()
-        for value, expected in (("8", 8.0), ("8s", 8.0), ("5m", 300.0), ("1.5m", 90.0), ("600", 600.0), ("10m", 600.0), ("30S", 30.0)):
+        for value, expected in (("0.2", 0.2), ("8", 8.0), ("8s", 8.0), ("1m", 60.0), ("5m", 300.0), ("1.5m", 90.0), ("0.1h", 360.0), ("600", 600.0), ("10m", 600.0), ("30S", 30.0)):
             with self.subTest(value=value):
                 args = parser.parse_args(["fade", "70", value])
                 self.assertEqual(cli._control_args(args), ("fade", {"brightness": 70, "duration": expected}))
-        for value in ("601", "11m", "0.1", "abc", "5x"):
+        for value in ("601", "11m", "0.1", "abc", "5x", "nan", "inf", "-inf", "1e309", "0", "-1"):
             with self.subTest(value=value), self.assertRaises(SystemExit):
                 parser.parse_args(["fade", "70", value])
 
@@ -294,6 +294,16 @@ class CLITests(unittest.TestCase):
         # An everyday alias names a real command, so help resolves it.
         result = cli.dispatch(cli.build_parser().parse_args(["help", "lights"]))
         self.assertIn("devices", result["help"])
+
+    def test_help_aliases_describe_the_specific_action(self):
+        for alias, usage in (("lights", "devices list"), ("use", "devices use"),
+                             ("login", "auth login"), ("save", "scene save"), ("scenes", "scene list")):
+            with self.subTest(alias=alias):
+                self.assertIn(f"usage: cync {usage}", cli._help_text(alias))
+        fade = cli._help_text("fade")
+        self.assertIn("1m", fade)
+        self.assertIn("600", fade)
+        self.assertIn("default: 2 seconds", " ".join(fade.split()))
 
     def test_fade_timeout_includes_requested_fade_duration(self):
         calls = []

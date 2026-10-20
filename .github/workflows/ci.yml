@@ -31,3 +31,5 @@ jobs:
       - name: Run crypto self-test
         run: |
           "$RUNNER_TEMP/cync-helper" --crypto-self-test
+      - name: Test native fade timing and cleanup without Bluetooth
+        run: python3 scripts/test_native.py

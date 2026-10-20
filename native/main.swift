@@ -108,7 +108,7 @@ if CommandLine.arguments.contains("--crypto-self-test") {
     jsonOut(["ok":ok]); exit(ok ? 0:1)
 }
 
-final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPeripheralDelegate {
+class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPeripheralDelegate {
     let prefix="00010203-0405-0607-0809-0A0B0C0D"
     var runtime:URL!
     var central:CBCentralManager!
@@ -120,7 +120,7 @@ final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPer
     var job:[String:Any]?,expected=[String:Any](),ready=false,handshaking=false
     var servicesPending=0,seq=Int.random(in:1...0xfffffe),phase="",lastActivity=Date()
     var discovery=[String:[String:Any]](),infoValues=[String:String]()
-    var deadline=Date.distantPast,verifyAfter=Double.greatestFiniteMagnitude
+    var deadline=0.0,verifyAfter=Double.greatestFiniteMagnitude
     var fadeTimer:Timer?,pollTimer:Timer?,fadeActivity:NSObjectProtocol?
     var generation=0
     var jobID:String { job?["request_id"] as? String ?? "" }
@@ -135,7 +135,7 @@ final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPer
     }
     func poll() {
         if job != nil {
-            if Date()>deadline { fail("TIMEOUT","Bulb did not confirm the request. Check range, Bluetooth permission and other connected apps.") }
+            if ProcessInfo.processInfo.systemUptime>deadline { fail("TIMEOUT","Bulb did not confirm the request. Check range, Bluetooth permission and other connected apps.") }
             return
         }
         if ready && Date().timeIntervalSince(lastActivity)>90 { disconnect() }
@@ -146,7 +146,7 @@ final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPer
         generation+=1; job=object; expected=[:]; verifyAfter=Double.greatestFiniteMagnitude
         // The cap is a safety net only. The CLI sends duration+35 for a fade,
         // so a 600s fade needs 635s of headroom for connect and verify.
-        deadline=Date().addingTimeInterval(min(700,max(1,object["timeout"] as? Double ?? 35)))
+        deadline=ProcessInfo.processInfo.systemUptime+min(700,max(1,object["timeout"] as? Double ?? 35))
         lastActivity=Date(); handleJob()
     }
     func command() -> String { job?["command"] as? String ?? "" }
@@ -355,19 +355,25 @@ final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPer
         // A long fade must keep running while the Mac is idle, so ask the
         // system to defer App Nap and idle sleep until the ramp ends.
         fadeActivity=ProcessInfo.processInfo.beginActivity(options:.userInitiated,reason:"Cync fade")
-        // Step count is capped so a long fade sends no more Bluetooth writes
-        // than a 60s fade does today. The ramp still takes exactly `duration`.
+        // Limit timer frequency, but interpolate from monotonic elapsed time:
+        // Timer skips callbacks when the main loop is busy. Counting callbacks
+        // would extend the ramp and could exhaust the verification deadline.
         let start=state["brightness"] as? Int ?? 0,steps=max(2,min(400,Int(duration/0.15))),id=jobID
+        let started=ProcessInfo.processInfo.systemUptime
         if desired>0 && state["on"] as? Bool != true { _=send(0xd0,[1]) }
-        var index=0
+        var lastBrightness:Int?
         fadeTimer=Timer.scheduledTimer(withTimeInterval:duration/Double(steps),repeats:true) { timer in
             guard self.jobID==id else { timer.invalidate(); return }
-            index+=1
-            let b=Int((Double(start)+Double(desired-start)*Double(index)/Double(steps)).rounded())
-            if b>0 { _=self.send(0xd2,[UInt8(min(100,b))]) } else { _=self.send(0xd0,[0]) }
-            if index>=steps {
+            let progress=min(1,max(0,(ProcessInfo.processInfo.systemUptime-started)/duration))
+            if progress>=1 {
+                if desired>0 { _=self.send(0xd2,[UInt8(desired)]) } else { _=self.send(0xd0,[0]) }
                 timer.invalidate(); self.expected=["brightness":desired,"on":desired>0]
                 self.after(0.4) { if self.jobID==id { self.verifyAfter=Date().timeIntervalSince1970; self.phase="verifying"; self.queryState() } }
+            } else if start>0 || desired>0 {
+                // Zero means power-off, not a dim level. In particular, an
+                // off-to-1% fade must not power on then round back down to off.
+                let b=max(1,min(100,Int((Double(start)+Double(desired-start)*progress).rounded())))
+                if b != lastBrightness { _=self.send(0xd2,[UInt8(b)]); lastBrightness=b }
             }
         }
     }
@@ -401,5 +407,7 @@ final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPer
     }
     func applicationWillTerminate(_ notification:Notification) { disconnect() }
 }
+#if !NATIVE_TESTS
 let helper=Helper(),application=NSApplication.shared
 application.delegate=helper; application.setActivationPolicy(.accessory); application.run()
+#endif
