@@ -108,7 +108,7 @@ if CommandLine.arguments.contains("--crypto-self-test") {
     jsonOut(["ok":ok]); exit(ok ? 0:1)
 }
 
-final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPeripheralDelegate {
+class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPeripheralDelegate {
     let prefix="00010203-0405-0607-0809-0A0B0C0D"
     var runtime:URL!
     var central:CBCentralManager!
@@ -120,8 +120,8 @@ final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPer
     var job:[String:Any]?,expected=[String:Any](),ready=false,handshaking=false
     var servicesPending=0,seq=Int.random(in:1...0xfffffe),phase="",lastActivity=Date()
     var discovery=[String:[String:Any]](),infoValues=[String:String]()
-    var deadline=Date.distantPast,verifyAfter=Double.greatestFiniteMagnitude
-    var fadeTimer:Timer?,pollTimer:Timer?
+    var deadline=0.0,verifyAfter=Double.greatestFiniteMagnitude
+    var fadeTimer:Timer?,pollTimer:Timer?,fadeActivity:NSObjectProtocol?
     var generation=0
     var jobID:String { job?["request_id"] as? String ?? "" }
     var node:Int { profile["node"] as? Int ?? 0 }
@@ -135,7 +135,7 @@ final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPer
     }
     func poll() {
         if job != nil {
-            if Date()>deadline { fail("TIMEOUT","Bulb did not confirm the request. Check range, Bluetooth permission and other connected apps.") }
+            if ProcessInfo.processInfo.systemUptime>deadline { fail("TIMEOUT","Bulb did not confirm the request. Check range, Bluetooth permission and other connected apps.") }
             return
         }
         if ready && Date().timeIntervalSince(lastActivity)>90 { disconnect() }
@@ -144,7 +144,9 @@ final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPer
         try? FileManager.default.removeItem(at:path)
         guard let object=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],let id=object["request_id"] as? String,UUID(uuidString:id) != nil else { return }
         generation+=1; job=object; expected=[:]; verifyAfter=Double.greatestFiniteMagnitude
-        deadline=Date().addingTimeInterval(min(120,max(1,object["timeout"] as? Double ?? 35)))
+        // The cap is a safety net only. The CLI sends duration+35 for a fade,
+        // so a 600s fade needs 635s of headroom for connect and verify.
+        deadline=ProcessInfo.processInfo.systemUptime+min(700,max(1,object["timeout"] as? Double ?? 35))
         lastActivity=Date(); handleJob()
     }
     func command() -> String { job?["command"] as? String ?? "" }
@@ -273,9 +275,11 @@ final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPer
             state=["on":brightness>0,"brightness":brightness,"color_mode":rgb ? "rgb":"white","observed_at":now]
             if rgb { state["rgb"]=[Int((data[i+3]&0xe0)>>5)*255/7,Int((data[i+3]&0x1c)>>2)*255/7,Int(data[i+3]&3)*255/3] }
             else { state["white"]=Int(data[i+3]) }
-            guard job != nil else { continue }
-            if phase=="fadeBaseline" { beginFade(); continue }
+            guard job != nil else { rememberBrightness(brightness); continue }
+            if phase=="fadeBaseline" { rememberBrightness(brightness); beginFade(); continue }
+            if phase=="offBaseline" { rememberBrightness(brightness); phase="offBaselineReady"; execute(); continue }
             if now>=verifyAfter, matches() {
+                rememberBrightness(brightness)
                 var extra:[String:Any]=["verified":true,"state":state]
                 if command()=="info" { extra["info"]=["firmware":infoValues["2A26"] ?? "","hardware":infoValues["2A27"] ?? "","manufacturer":infoValues["2A29"] ?? "","type":metadata["type"] ?? NSNull(),"services":metadata["services"] ?? [],"peripheral_id":peer?.identifier.uuidString ?? ""] }
                 finish(extra)
@@ -306,8 +310,15 @@ final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPer
         guard job != nil,ready else { return }
         let v=values()
         if command()=="fade" {
-            guard let b=v["brightness"] as? Int,(0...100).contains(b),let duration=v["duration"] as? Double,(0.2...60).contains(duration) else { fail("INVALID_VALUE","Fade requires brightness 0–100 and duration 0.2–60 seconds."); return }
+            let restore=v["restore_brightness"] as? Bool == true
+            let validTarget=restore ? v["brightness"]==nil : (v["brightness"] as? Int).map { (0...100).contains($0) } ?? false
+            guard validTarget,let duration=v["duration"] as? Double,(0.2...600).contains(duration) else { fail("INVALID_VALUE","Fade requires brightness 0–100 or restore_brightness, and duration 0.2–600 seconds (10 minutes)."); return }
             phase="fadeBaseline"; queryState(); return
+        }
+        // An off report discards brightness. Read and save the actual level
+        // before off, including after helper restarts or external changes.
+        if command()=="set",v["on"] as? Bool == false || v["brightness"] as? Int == 0,phase != "offBaselineReady" {
+            phase="offBaseline"; queryState(); return
         }
         var packets=[(UInt8,[UInt8])](); expected=[:]
         if command()=="set" {
@@ -347,33 +358,73 @@ final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPer
             if self.jobID==id { self.verifyAfter=Date().timeIntervalSince1970; self.queryState() }
         }
     }
+    func brightnessLevels() -> [String:Int] {
+        guard let data=try? Data(contentsOf:runtime.appendingPathComponent("brightness-levels.json")),
+              let levels=(try? JSONSerialization.jsonObject(with:data)) as? [String:Int] else { return [:] }
+        return levels
+    }
+    func previousBrightness() -> Int? {
+        guard let id=profile["id"] as? String,let b=brightnessLevels()[id],(1...100).contains(b) else { return nil }
+        return b
+    }
+    func rememberBrightness(_ brightness:Int) {
+        guard (1...100).contains(brightness),let id=profile["id"] as? String else { return }
+        var levels=brightnessLevels()
+        guard levels[id] != brightness else { return }
+        levels[id]=brightness
+        guard let data=try? JSONSerialization.data(withJSONObject:levels,options:[.sortedKeys]) else { return }
+        let path=runtime.appendingPathComponent("brightness-levels.json")
+        do {
+            try data.write(to:path,options:.atomic)
+            try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:path.path)
+        } catch { fail("STATE_SAVE_FAILED","Could not save the previous brightness in the private runtime directory.") }
+    }
     func beginFade() {
-        guard phase=="fadeBaseline",let desired=values()["brightness"] as? Int,let duration=values()["duration"] as? Double else { return }
+        guard phase=="fadeBaseline",let duration=values()["duration"] as? Double else { return }
+        let target=values()["restore_brightness"] as? Bool == true ? previousBrightness() ?? 100 : values()["brightness"] as? Int
+        guard let desired=target else { return }
         phase="fading"
-        let start=state["brightness"] as? Int ?? 0,steps=max(2,Int(duration/0.15)),id=jobID
+        // A long fade must keep running while the Mac is idle, so ask the
+        // system to defer App Nap and idle sleep until the ramp ends.
+        fadeActivity=ProcessInfo.processInfo.beginActivity(options:.userInitiated,reason:"Cync fade")
+        // Keep the original ~150ms cadence through five minutes. Beyond that,
+        // spread the same 2000 steps out (at most ~300ms for a ten-minute fade).
+        // Interpolate from monotonic elapsed time:
+        // Timer skips callbacks when the main loop is busy. Counting callbacks
+        // would extend the ramp and could exhaust the verification deadline.
+        let start=state["brightness"] as? Int ?? 0,steps=max(2,min(2000,Int(duration/0.15))),id=jobID
+        let started=ProcessInfo.processInfo.systemUptime
         if desired>0 && state["on"] as? Bool != true { _=send(0xd0,[1]) }
-        var index=0
         fadeTimer=Timer.scheduledTimer(withTimeInterval:duration/Double(steps),repeats:true) { timer in
             guard self.jobID==id else { timer.invalidate(); return }
-            index+=1
-            let b=Int((Double(start)+Double(desired-start)*Double(index)/Double(steps)).rounded())
-            if b>0 { _=self.send(0xd2,[UInt8(min(100,b))]) } else { _=self.send(0xd0,[0]) }
-            if index>=steps {
+            let progress=min(1,max(0,(ProcessInfo.processInfo.systemUptime-started)/duration))
+            if progress>=1 {
+                if desired>0 { _=self.send(0xd2,[UInt8(desired)]) } else { _=self.send(0xd0,[0]) }
                 timer.invalidate(); self.expected=["brightness":desired,"on":desired>0]
                 self.after(0.4) { if self.jobID==id { self.verifyAfter=Date().timeIntervalSince1970; self.phase="verifying"; self.queryState() } }
+            } else if start>0 || desired>0 {
+                // Zero means power-off, not a dim level. In particular, an
+                // off-to-1% fade must not power on then round back down to off.
+                let b=max(1,min(100,Int((Double(start)+Double(desired-start)*progress).rounded())))
+                // Keep every scheduled write, including repeated rounded levels,
+                // matching the original short-fade stepping behavior.
+                _=self.send(0xd2,[UInt8(b)])
             }
         }
     }
     func after(_ delay:Double,_ callback:@escaping ()->Void) { DispatchQueue.main.asyncAfter(deadline:.now()+delay,execute:callback) }
+    func endFadeActivity() {
+        if let activity=fadeActivity { ProcessInfo.processInfo.endActivity(activity); fadeActivity=nil }
+    }
     func finish(_ extra:[String:Any]) {
         guard job != nil else { return }
         var result:[String:Any]=["schema_version":1,"request_id":jobID,"ok":true,"connected":ready]
         for (k,v) in extra { result[k]=v }
-        writeResponse(result); job=nil; expected=[:]; phase="idle"; lastActivity=Date()
+        writeResponse(result); job=nil; expected=[:]; phase="idle"; lastActivity=Date(); endFadeActivity()
     }
     func fail(_ code:String,_ message:String) {
         guard job != nil else { return }
-        let id=jobID; fadeTimer?.invalidate(); job=nil; expected=[:]; disconnect()
+        let id=jobID; fadeTimer?.invalidate(); endFadeActivity(); job=nil; expected=[:]; disconnect()
         writeResponse(["schema_version":1,"request_id":id,"ok":false,"verified":false,"connected":false,"error":["code":code,"message":message]])
     }
     func writeResponse(_ value:[String:Any]) {
@@ -383,7 +434,7 @@ final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPer
         try? FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:path.path)
     }
     func disconnect() {
-        fadeTimer?.invalidate(); fadeTimer=nil; central?.stopScan()
+        fadeTimer?.invalidate(); fadeTimer=nil; endFadeActivity(); central?.stopScan()
         queuedPeer=nil
         let old=peer; peer=nil
         if let p=old,p.state != .disconnected { disconnecting.insert(p.identifier); central?.cancelPeripheralConnection(p) }
@@ -391,5 +442,7 @@ final class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPer
     }
     func applicationWillTerminate(_ notification:Notification) { disconnect() }
 }
+#if !NATIVE_TESTS
 let helper=Helper(),application=NSApplication.shared
 application.delegate=helper; application.setActivationPolicy(.accessory); application.run()
+#endif

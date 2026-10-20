@@ -12,6 +12,7 @@ venv/
 .env.*
 config.json
 scenes.json
+brightness-levels.json
 runtime/
 *.sqlite
 *.db
