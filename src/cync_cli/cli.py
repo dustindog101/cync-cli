@@ -51,7 +51,7 @@ class CLIArgumentParser(argparse.ArgumentParser):
                 "  cync red [BRIGHTNESS]    Set a named or hex color\n"
                 "  cync 35                  Set brightness; 0 turns the light off\n"
                 "  cync on | off | status   Power and inspect the selected light\n"
-                "  cync fade 70 [TIME]      Fade to a brightness (up to 10 minutes)\n"
+                "  cync fade 70|on|off [TIME] Fade to brightness, on, or off\n"
                 "  cync white [LEVEL]       Set white level (default 50)\n"
                 "  cync save NAME           Save the current scene\n"
                 "  cync scene NAME          Apply a saved scene\n"
@@ -106,7 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--white")
     _add_output_options(p)
     p = sub.add_parser("fade", help="fade to a brightness over time")
-    p.add_argument("brightness")
+    p.add_argument("brightness", metavar="TARGET", help="brightness 0–100, on (previous brightness), or off (0)")
     p.add_argument("duration_pos", nargs="?", type=_fade_duration, metavar="TIME",
                    help="0.2–600 seconds; accepts 60, 60s, or 1m (default: 2 seconds)")
     p.add_argument("--duration", dest="duration_flag", type=_fade_duration, metavar="TIME",
@@ -411,7 +411,11 @@ def _control_args(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
         if positional is not None and flag is not None:
             raise CLIError("invalid_input", "Specify fade duration once: use a positional value or --duration")
         duration = positional if positional is not None else flag if flag is not None else 2.0
-        return "fade", {"brightness": parse_percent(args.brightness, name="brightness"), "duration": duration}
+        target = args.brightness.lower()
+        if target == "on":
+            return "fade", {"restore_brightness": True, "duration": duration}
+        brightness = 0 if target == "off" else parse_percent(args.brightness, name="brightness")
+        return "fade", {"brightness": brightness, "duration": duration}
     raise CLIError("invalid_command", f"Unsupported command {command}")
 
 

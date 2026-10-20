@@ -275,9 +275,11 @@ class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPeriphera
             state=["on":brightness>0,"brightness":brightness,"color_mode":rgb ? "rgb":"white","observed_at":now]
             if rgb { state["rgb"]=[Int((data[i+3]&0xe0)>>5)*255/7,Int((data[i+3]&0x1c)>>2)*255/7,Int(data[i+3]&3)*255/3] }
             else { state["white"]=Int(data[i+3]) }
-            guard job != nil else { continue }
-            if phase=="fadeBaseline" { beginFade(); continue }
+            guard job != nil else { rememberBrightness(brightness); continue }
+            if phase=="fadeBaseline" { rememberBrightness(brightness); beginFade(); continue }
+            if phase=="offBaseline" { rememberBrightness(brightness); phase="offBaselineReady"; execute(); continue }
             if now>=verifyAfter, matches() {
+                rememberBrightness(brightness)
                 var extra:[String:Any]=["verified":true,"state":state]
                 if command()=="info" { extra["info"]=["firmware":infoValues["2A26"] ?? "","hardware":infoValues["2A27"] ?? "","manufacturer":infoValues["2A29"] ?? "","type":metadata["type"] ?? NSNull(),"services":metadata["services"] ?? [],"peripheral_id":peer?.identifier.uuidString ?? ""] }
                 finish(extra)
@@ -308,8 +310,15 @@ class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPeriphera
         guard job != nil,ready else { return }
         let v=values()
         if command()=="fade" {
-            guard let b=v["brightness"] as? Int,(0...100).contains(b),let duration=v["duration"] as? Double,(0.2...600).contains(duration) else { fail("INVALID_VALUE","Fade requires brightness 0–100 and duration 0.2–600 seconds (10 minutes)."); return }
+            let restore=v["restore_brightness"] as? Bool == true
+            let validTarget=restore ? v["brightness"]==nil : (v["brightness"] as? Int).map { (0...100).contains($0) } ?? false
+            guard validTarget,let duration=v["duration"] as? Double,(0.2...600).contains(duration) else { fail("INVALID_VALUE","Fade requires brightness 0–100 or restore_brightness, and duration 0.2–600 seconds (10 minutes)."); return }
             phase="fadeBaseline"; queryState(); return
+        }
+        // An off report discards brightness. Read and save the actual level
+        // before off, including after helper restarts or external changes.
+        if command()=="set",v["on"] as? Bool == false || v["brightness"] as? Int == 0,phase != "offBaselineReady" {
+            phase="offBaseline"; queryState(); return
         }
         var packets=[(UInt8,[UInt8])](); expected=[:]
         if command()=="set" {
@@ -349,19 +358,43 @@ class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPeriphera
             if self.jobID==id { self.verifyAfter=Date().timeIntervalSince1970; self.queryState() }
         }
     }
+    func brightnessLevels() -> [String:Int] {
+        guard let data=try? Data(contentsOf:runtime.appendingPathComponent("brightness-levels.json")),
+              let levels=(try? JSONSerialization.jsonObject(with:data)) as? [String:Int] else { return [:] }
+        return levels
+    }
+    func previousBrightness() -> Int? {
+        guard let id=profile["id"] as? String,let b=brightnessLevels()[id],(1...100).contains(b) else { return nil }
+        return b
+    }
+    func rememberBrightness(_ brightness:Int) {
+        guard (1...100).contains(brightness),let id=profile["id"] as? String else { return }
+        var levels=brightnessLevels()
+        guard levels[id] != brightness else { return }
+        levels[id]=brightness
+        guard let data=try? JSONSerialization.data(withJSONObject:levels,options:[.sortedKeys]) else { return }
+        let path=runtime.appendingPathComponent("brightness-levels.json")
+        do {
+            try data.write(to:path,options:.atomic)
+            try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:path.path)
+        } catch { fail("STATE_SAVE_FAILED","Could not save the previous brightness in the private runtime directory.") }
+    }
     func beginFade() {
-        guard phase=="fadeBaseline",let desired=values()["brightness"] as? Int,let duration=values()["duration"] as? Double else { return }
+        guard phase=="fadeBaseline",let duration=values()["duration"] as? Double else { return }
+        let target=values()["restore_brightness"] as? Bool == true ? previousBrightness() ?? 100 : values()["brightness"] as? Int
+        guard let desired=target else { return }
         phase="fading"
         // A long fade must keep running while the Mac is idle, so ask the
         // system to defer App Nap and idle sleep until the ramp ends.
         fadeActivity=ProcessInfo.processInfo.beginActivity(options:.userInitiated,reason:"Cync fade")
-        // Limit timer frequency, but interpolate from monotonic elapsed time:
+        // Keep the original ~150ms cadence through five minutes. Beyond that,
+        // spread the same 2000 steps out (at most ~300ms for a ten-minute fade).
+        // Interpolate from monotonic elapsed time:
         // Timer skips callbacks when the main loop is busy. Counting callbacks
         // would extend the ramp and could exhaust the verification deadline.
-        let start=state["brightness"] as? Int ?? 0,steps=max(2,min(400,Int(duration/0.15))),id=jobID
+        let start=state["brightness"] as? Int ?? 0,steps=max(2,min(2000,Int(duration/0.15))),id=jobID
         let started=ProcessInfo.processInfo.systemUptime
         if desired>0 && state["on"] as? Bool != true { _=send(0xd0,[1]) }
-        var lastBrightness:Int?
         fadeTimer=Timer.scheduledTimer(withTimeInterval:duration/Double(steps),repeats:true) { timer in
             guard self.jobID==id else { timer.invalidate(); return }
             let progress=min(1,max(0,(ProcessInfo.processInfo.systemUptime-started)/duration))
@@ -373,7 +406,9 @@ class Helper:NSObject,NSApplicationDelegate,CBCentralManagerDelegate,CBPeriphera
                 // Zero means power-off, not a dim level. In particular, an
                 // off-to-1% fade must not power on then round back down to off.
                 let b=max(1,min(100,Int((Double(start)+Double(desired-start)*progress).rounded())))
-                if b != lastBrightness { _=self.send(0xd2,[UInt8(b)]); lastBrightness=b }
+                // Keep every scheduled write, including repeated rounded levels,
+                // matching the original short-fade stepping behavior.
+                _=self.send(0xd2,[UInt8(b)])
             }
         }
     }

@@ -48,6 +48,9 @@ the default helper/runtime unless `CYNC_HOME` is changed.
   mailbox transport and serialized client access.
 - `native/main.swift`: AES/Telink protocol, Keychain operations, Cocoa/CoreBluetooth
   lifecycle, connection/authentication, command scheduling and status verification.
+  It also stores confirmed positive brightness by profile ID in private
+  `runtime/brightness-levels.json` for `fade on` across helper restarts. The file
+  contains local profile IDs and levels, not credentials. Treat it as private data.
 - `tests/test_*.py`: offline Python contracts. `tests/native_fade.swift`: production
   native callbacks with synthetic packet writes and encrypted status notifications.
   `scripts/test_native.py` concatenates the helper and tests in a temporary build,
@@ -86,13 +89,26 @@ so a maximum fade retains its full 635-second budget for connection and readback
 
 After fresh baseline status, the helper holds a `.userInitiated` process activity
 through completion/failure. Callback count is
-`max(2, min(400, Int(duration / 0.15)))`, at interval `duration / count`.
+`max(2, min(2000, Int(duration / 0.15)))`, at interval `duration / count`.
+This preserves the original approximately 150 ms cadence through five minutes.
+Longer ramps spread up to 2000 steps out, reaching 300 ms at ten minutes.
 Each callback interpolates from **elapsed monotonic time**, catching up if a
-callback is delayed. It suppresses identical rounded brightness writes. Positive
+callback is delayed. Repeated rounded levels are still written at the normal
+cadence, preserving the original stepping behavior. Positive
 intermediate levels are at least 1; off is sent only at a zero target's completion.
 The final target is explicitly sent, then a 400 ms settling delay precedes a fresh
 status query. No success is returned until that state matches. Cleanup releases
 activity/timers on failure, disconnect, success, and process termination.
+
+`fade on` sends `restore_brightness: true` instead of a numeric brightness. The
+helper resolves it after the baseline query to the last confirmed positive level
+for the selected profile; the fallback is 100 only when no level has been saved.
+Ordinary off obtains a fresh pre-off baseline before writes, and fade-off uses its
+existing baseline query. Store those positive baselines and verified positive
+endpoints, never intermediate fade-down reports or zero. The private JSON file is
+written atomically with mode 0600. `STATE_SAVE_FAILED` reports persistence failure
+instead of claiming the brightness was remembered. The result's `requested`
+object retains the restore flag; `state` supplies the actual verified endpoint.
 
 Keep the CLI and native limits/timeouts synchronized. Extending the helper cap
 is necessary for long fades; a 120-second native cap truncates a 120-second ramp

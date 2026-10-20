@@ -18,7 +18,8 @@ are included here.
 - An off-to-low fade rounded intermediate brightness to zero and sent power-off
   after power-on. A native regression reproduced that sequence. Positive ramps
   now hold at least protocol level 1 and send off only when completing a zero
-  target. Repeated rounded levels are suppressed.
+  target. This initial review suppressed repeated rounded levels; the cadence
+  follow-up below restores those writes at the user's request.
 - Alias help stopped at the parent command and fade help did not explain units,
   limits, or defaults. Help now follows the precise alias action and documents
   the time arguments.
@@ -79,3 +80,43 @@ hardware-tested. The CLI currently has no native cancellation/resume mechanism;
 an accepted fade can continue after its Python caller exits. Other commands wait
 behind the serialized client lock. These limits are documented in the
 [command reference](commands.md) and [development guide](development.md).
+
+## Cadence and previous-brightness follow-up
+
+The user requested the original steps through five minutes and `fade on` to
+restore the previous brightness. The 400-step cap stretched a two-minute fade's
+interval to 300 ms and a five-minute fade's to 750 ms. Suppressing repeated
+rounded values also reduced actual writes even on shorter fades.
+
+The current implementation restores every scheduled brightness write at roughly
+150 ms through five minutes. Beyond five minutes it caps the ramp at 2000 steps,
+gradually increasing the interval to 300 ms at ten minutes. Elapsed-time timing,
+off-at-completion, final readback, and sleep protection remain in place.
+
+`fade on` now restores the last confirmed positive brightness per profile, with
+100% used only if no level is known. Ordinary off captures fresh brightness before
+sending off; fade-off remembers its starting baseline. Intermediate ramp reports
+cannot overwrite the restore target. Levels persist privately across restarts in
+`runtime/brightness-levels.json`; `fade off` is an alias for target 0.
+
+59 Python tests and native regressions pass. New cadence tests fail against the
+previous `c834249` implementation at 120, 299, 300, and 600 seconds and for repeated
+levels, then pass with this change. Native tests also cover per-profile memory,
+restoration after restart, fade-down preservation, ordinary-off baseline capture,
+unknown-level fallback, mode 0600, and aborting off if persistence fails. Production
+Swift compilation, crypto self-test, and privacy audit pass.
+
+Installed hardware verification of the final restore behavior:
+
+- Set 37%, ordinary off, then helper shutdown. `cync fade on 1m` returned
+  `verified: true` at **37%**, taking **69.15 seconds** end to end including helper
+  launch, connection, ramp, and final readback. Independent status confirmed 37%.
+- `cync fade off 3s` returned verified off in **4.38 seconds**; independent status
+  confirmed off. After another helper restart, `cync fade on 3s` again verified
+  37%, proving fade-down had not replaced the stored restore level.
+- Restored the initial reported off state in `finally`. Installed Python and
+  Swift sources matched the checkout byte-for-byte.
+
+Cadence boundaries at five and ten minutes are covered by native tests; these
+longer hardware ramps were not repeated for this follow-up. Whole-percent bulb
+levels and possible power-on restoration flashes still limit visual smoothness.

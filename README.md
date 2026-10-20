@@ -25,6 +25,8 @@ cync 35                # set brightness; 0 turns the light off
 cync off
 cync fade 70 8         # fade to 70% over 8 seconds (default: 2 seconds)
 cync fade 70 1m        # fade to 70% over one minute
+cync fade on 1m        # fade back to the previous brightness
+cync fade off 8        # fade down to off
 cync fade 70 5m        # fade to 70% over 5 minutes (up to 10 minutes)
 cync white             # tunable white, default level 50
 cync save evening

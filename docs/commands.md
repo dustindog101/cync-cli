@@ -56,6 +56,8 @@ the requested level reached. This observation is not a universal minimum.
 cync fade 70                      # 2 seconds
 cync fade 70 60                   # one minute
 cync fade 70 1m                   # also one minute
+cync fade on 1m                   # fade to the previous brightness
+cync fade off 8                   # fade to 0%, then off
 cync fade 70 --duration 1m
 cync fade 70 1.5m                 # 90 seconds
 cync fade 0 10m                   # fade down, then turn off at the end
@@ -66,9 +68,18 @@ or case-insensitive `s`, `m`, `h` suffixes (for example, `0.1h` is six minutes).
 The total must be 0.2–600 seconds; `1h` exceeds the ten-minute limit. Non-finite
 and out-of-range values fail before device access.
 
+`on` restores the last confirmed positive brightness for that light; `off` means
+0%. The helper remembers a fresh level before ordinary off or fade-to-off, and
+keeps that level across restarts. Intermediate fade-down values do not replace
+it. If the CLI has never observed a positive level for the profile, `on` falls
+back to 100%. A numeric target remains explicit. The same default two-second
+duration and optional TIME/`--duration` apply to these words.
+
 Fades change brightness only and power on when the target is positive. They run
 on the Mac over Bluetooth, interpolating from a fresh baseline using monotonic
-elapsed time. They use whole-percent steps, suppress repeated levels, and never
+elapsed time. They use whole-percent steps at the original approximately 150 ms
+cadence through five minutes, including repeated rounded levels. Longer fades
+spread a maximum of 2000 steps out (300 ms at ten minutes). Fades never
 use off as an intermediate dim level. A positive fade from off starts at the
 bulb's minimum visible brightness; power-on may briefly restore a remembered level.
 

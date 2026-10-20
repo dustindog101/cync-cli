@@ -283,6 +283,14 @@ class CLITests(unittest.TestCase):
         args = cli.build_parser().parse_args(["fade", "70", "--duration", "2m"])
         self.assertEqual(cli._control_args(args), ("fade", {"brightness": 70, "duration": 120.0}))
 
+    def test_fade_on_and_off_aliases_request_restore_or_zero(self):
+        for target, values in (("on", {"restore_brightness": True}), ("off", {"brightness": 0}), ("ON", {"restore_brightness": True})):
+            with self.subTest(target=target):
+                args = cli.build_parser().parse_args(["fade", target, "1m"])
+                self.assertEqual(cli._control_args(args), ("fade", {**values, "duration": 60.0}))
+        args = cli.build_parser().parse_args(["fade", "on"])
+        self.assertEqual(cli._control_args(args), ("fade", {"restore_brightness": True, "duration": 2.0}))
+
     def test_help_command_shows_root_and_command_help(self):
         result = cli.dispatch(cli.build_parser().parse_args(["help"]))
         self.assertEqual(result["command"], "help")

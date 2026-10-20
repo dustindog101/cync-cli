@@ -32,6 +32,12 @@ Read [README.md](README.md), [the command reference](docs/commands.md), and
 - Fade durations are 0.2–600 seconds (default 2). Maintain CLI validation,
   `duration + 35` request timeout, native deadline headroom, monotonic elapsed-time
   interpolation, callback cap, and activity/timer cleanup together.
+- `fade on` requests `restore_brightness`; it restores the last confirmed positive
+  level for the selected profile (100 only when unknown). `fade off` maps to 0.
+  Remember a fresh baseline before ordinary off/fade-off, persist it privately
+  across helper restarts, and do not overwrite it with intermediate fade-down levels.
+- Preserve the original ~150 ms stepping through five minutes, including repeated
+  rounded levels. Longer fades spread up to 2000 steps over the requested duration.
 - Do not send off for a rounded intermediate zero during a positive fade.
   Fade-to-zero sends off at completion. Keep success blocked until final readback.
 - Keep disconnect/reconnect serialized through CoreBluetooth's callback; do not
