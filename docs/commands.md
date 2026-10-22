@@ -1,7 +1,8 @@
 # Command reference
 
-`cync help` / `cync --help` lists commands. `cync help fade` or
-`cync fade --help` explains a command. Alias help follows the underlying action:
+`cync help` / `cync --help` lists commands. `cync help fade`, `cync fade help`, or
+`cync fade --help` explains a command. Help also accepts nested paths, such as
+`cync scene save help` or `cync help scene save`. Alias help follows the underlying action:
 `cync help save` describes `scene save`, including its required name.
 
 ## Light selection and output
@@ -17,7 +18,10 @@
   after the final subcommand.
 - `--json` returns `schema_version: 1`, `ok`, and command-specific fields. Control
   success includes `verified: true` and fresh `state`; failures include `error`
-  with a code and message and a nonzero exit status. JSON may contain device
+  with a code and message and a nonzero exit status. A background fade instead
+  returns `accepted: true`, `verified: false`, and `operation_id` after starting;
+  this acknowledges acceptance, not completion. `fade status` returns the latest
+  `operation` with its status and final verified state or error. JSON may contain device
   identities. `watch --json` emits a stream of JSON lines.
 
 ## Power, brightness, and color
@@ -35,7 +39,8 @@ cync color blue                   # explicit color; preserves power
 cync color blue 40                # explicit color plus brightness; turns on
 cync rgb 255 0 0                  # explicit RGB channels, 0–255
 cync white                        # power on, tunable-white level 50
-cync white 30                     # white level only; preserves power
+cync white 30                     # white tone only; preserves power
+cync white 0                      # white tone 0, not brightness/off
 cync set --on --brightness 40 --white 60
 cync set --color red --brightness 40
 ```
@@ -43,7 +48,9 @@ cync set --color red --brightness 40
 Brightness and white level are integers 0–100. White level is the bulb's relative
 warmth control, not Kelvin. Brightness 0 turns off; combining it with `--on` is
 invalid. RGB and white are mutually exclusive. Explicit color-only/white-level
-commands may require the bulb already on to obtain matching readback. The bulb
+commands require the bulb on to obtain matching readback; a fresh off baseline
+returns `LIGHT_OFF` promptly. Use `cync on` first, or combine `--on` and
+`--white`/`--color` with `cync set`. The bulb
 quantizes reported RGB; small differences from requested channels are expected.
 Supported brightness levels can also depend on firmware: the bulb used in the
 2026-10-20 review reported 6% after requests for 1% or 2%, while 5% and 10%
@@ -61,6 +68,9 @@ cync fade off 8                   # fade to 0%, then off
 cync fade 70 --duration 1m
 cync fade 70 1.5m                 # 90 seconds
 cync fade 0 10m                   # fade down, then turn off at the end
+cync fade 70 1m --wait            # wait for verified completion
+cync fade status                 # most recent fade, including final result
+cync fade cancel                 # stop at the last applied level
 ```
 
 Use either positional TIME or `--duration`, once. Durations accept plain seconds
@@ -89,11 +99,31 @@ another controller can still interrupt it. Timer scheduling and final readback
 add overhead, so command runtime is longer than the requested ramp. This is not
 a hard real-time or bulb-resident schedule. Steps can be visible on long fades.
 
-Commands to this helper are serialized. Another command waits for the fade to
-finish. Ctrl-C stops the Python caller but does not cancel an already accepted
-native fade; the helper may continue to the target. There is no pause, resume,
-or cancellation command. A connection failure reports an error and leaves the
-light at its last applied level. Check status after an interrupted operation.
+The command returns after a fresh baseline and ramp start, so the same terminal
+can accept your next command. Initial connection/authentication can still take
+several seconds; startup fails after the normal 35-second budget instead of
+waiting for the entire requested fade duration. Starting a fade is not a claim
+that its target has been reached.
+`cync fade status` checks the latest operation: starting, running, completed, cancelled, or
+failed. Only a matching fresh endpoint report marks completion verified. The
+latest operation record is private local runtime data, not a schedule that resumes
+after helper shutdown. An interrupted running operation is marked failed when
+the helper restarts.
+
+`cync status` and `info` can read the selected fading light without stopping its
+ramp. Explicit `white LEVEL`, `color VALUE`, and `rgb R G B` changes also work
+during a fade and verify their own setting while brightness keeps changing.
+Commands that set brightness or power, including color shortcuts that power on,
+replace the fade. Another fade, disconnect, shutdown, scan, or selecting another
+physical light for a request stops it too. `cync fade cancel` stops further ramp writes and leaves the
+last applied level. Already transmitted Bluetooth writes cannot be recalled.
+The helper controls one active light/fade at a time.
+
+Use `--wait` when scripts need the verified endpoint and a nonzero exit on failure.
+A replaced foreground fade fails with `CANCELLED`. Ctrl-C stops the Python caller;
+an accepted fade can continue until completion, replacement, or explicit cancel.
+A connection failure leaves the light at its last applied level. Check status
+after an interrupted operation.
 
 ## Scenes
 

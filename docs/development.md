@@ -45,7 +45,7 @@ the default helper/runtime unless `CYNC_HOME` is changed.
 - `scenes.py`: profile-bound saved states and private atomic persistence.
 - `auth.py`: Cync bootstrap/login; store only mesh keys through the helper.
 - `backend.py`: helper source lookup/build/signing, Keychain stdin bridge, private
-  mailbox transport and serialized client access.
+  mailbox transport and serialized request publication.
 - `native/main.swift`: AES/Telink protocol, Keychain operations, Cocoa/CoreBluetooth
   lifecycle, connection/authentication, command scheduling and status verification.
   It also stores confirmed positive brightness by profile ID in private
@@ -60,8 +60,13 @@ the default helper/runtime unless `CYNC_HOME` is changed.
 
 ## Request and verification lifecycle
 
-Python obtains a file lock on `runtime/client.lock`, launches/reuses the helper,
-and atomically writes `runtime/request.json`. Each request has a UUID, command,
+Python launches/reuses the helper and obtains `runtime/client.lock` only to
+check and atomically publish the ordinary `runtime/request.json` mailbox.
+It sleeps outside the publication lock and releases it before waiting for a
+response, so a foreground fade cannot block another caller. Urgent `fade-status`,
+`fade-cancel`, and `doctor` requests use unique `runtime/priority-UUID.json` files;
+the helper checks these before the ordinary mailbox, including while a job runs.
+Each request has a UUID, command,
 device metadata, values, and timeout; it contains no mesh key. The native helper
 polls every 100 ms, connects/authenticates using Keychain, executes, and writes
 `response-UUID.json`. Python validates the matching response and cleans up its
@@ -75,7 +80,8 @@ for cancellation completion. Mesh/session credentials stay in Keychain/memory.
 Core commands are power `0xD0`, brightness `0xD2`, RGB/white `0xE2`, and query
 `0xDA`; notifications decode `0xDC` status. Color state is quantized by the bulb.
 Native matching allows brightness/white tolerance 1 and RGB tolerances
-37/37/85. Python rejects successful control responses unless `verified` is true.
+37/37/85. Python rejects completed control success unless `verified` is true; background
+start acceptance is separately labeled unverified.
 Verification is gated until after final writes; a matching earlier notification
 does not finish a fade. This establishes final reported state, not a recording
 of every physical light level during the ramp.
@@ -83,7 +89,11 @@ of every physical light level during the ramp.
 ## Fade invariants
 
 The CLI accepts finite durations 0.2–600 seconds and sends timeout `duration+35`.
-Python waits another three seconds for mailbox response delivery. Native request
+For background starts, Python waits at most 35 seconds plus three seconds for
+mailbox delivery; the native connection/baseline phase also has a 35-second cap.
+The helper gives an accepted background ramp its own duration+35 deadline.
+Foreground `--wait` retains the total duration+35 request budget and Python waits
+another three seconds for mailbox response delivery. Native request
 deadlines use monotonic uptime and clamp requested timeouts to 1–700 seconds,
 so a maximum fade retains its full 635-second budget for connection and readback.
 
@@ -97,7 +107,18 @@ callback is delayed. Repeated rounded levels are still written at the normal
 cadence, preserving the original stepping behavior. Positive
 intermediate levels are at least 1; off is sent only at a zero target's completion.
 The final target is explicitly sent, then a 400 ms settling delay precedes a fresh
-status query. No success is returned until that state matches. Cleanup releases
+status query. No verified completion is recorded until that state matches.
+Background fades acknowledge `accepted: true, verified: false, operation_id`
+after their baseline/start; `--wait` retains the foreground verified response.
+`runtime/fade-status.json` holds the latest operation result privately (0600).
+Concurrent status/info observers must not replace ramp context, overwrite restore
+brightness with intermediate values, or bypass endpoint verification. Explicit
+white/RGB-only controls use separate readback expectations and preserve the ramp.
+Brightness/power requests cancel/supersede it before their own writes; delayed
+callbacks must check job identity. Ordinary non-fade requests remain serialized.
+A new fade resets its final-readback gate. Restart marks a saved running fade
+failed rather than implying it resumed. Persistence failure must not be overwritten
+by completed status, and an unsaved operation must fail before sending ramp writes. `fade-status` and `fade-cancel` need no device profile. Cleanup releases
 activity/timers on failure, disconnect, success, and process termination.
 
 `fade on` sends `restore_brightness: true` instead of a numeric brightness. The
@@ -162,8 +183,14 @@ hidden settings. Report restoration failures explicitly.
 - `TIMEOUT` / `DISCONNECTED` / `CONNECTION_FAILED`: check power/range and competing
   phone/controllers; release connections with `disconnect`, then inspect fresh status.
   Do not assume a failed command left the light unchanged.
-- A command appears stuck behind a fade: the client lock serializes operations.
-  Wait for it to finish. Ctrl-C does not cancel an accepted fade in the native app.
+- A command appears stuck behind a fade: older installed versions held the client
+  lock for the entire fade. Refresh both installed Python and the idle native
+  helper. Current fades return after start; `fade status` checks completion and
+  `fade cancel` stops the ramp. `--wait` waits only its caller.
+- `white 0` changes white tone, not brightness. If the bulb is off, explicit
+  tone/color operations return `LIGHT_OFF`; use `on` or `set --on --white 0`.
+- Cold helper startup, Bluetooth connection/authentication, and fresh readback
+  still add latency. Commands never report transmission as verified success.
 
 See [the fade review](fade-review.md) for dated evidence. Privacy audit, unit tests,
 native simulation, installed CLI, real bulb readback, and remote CI are distinct

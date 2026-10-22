@@ -35,11 +35,15 @@ cync lights            # list saved light profiles
 cync use 1             # choose a light by number or name
 ```
 
-`cync help` shows the command list, and `cync help fade` explains one command. Fade durations accept plain seconds (`8`), seconds (`30s`), or minutes (`5m`, `1.5m`).
+`cync help` shows the command list; `cync fade help` or `cync help fade` explains one command. Fade durations accept plain seconds (`8`), seconds (`30s`), or minutes (`5m`, `1.5m`).
 
-Fades run on the Mac, which must stay in Bluetooth range. The command waits for
-the ramp and a fresh final readback. Ctrl-C stops the caller but can leave an
-accepted fade running in the helper. See [all commands and fade limits](docs/commands.md).
+Fades run in the background on the Mac, which must stay in Bluetooth range.
+The terminal returns after the helper reads the starting state and starts the ramp.
+Use `cync fade status` to check the result or `cync fade cancel` to stop.
+Status and explicit white/color changes work during a fade; brightness, power,
+or another fade replaces it.
+Use `cync fade 70 1m --wait` to wait for verified final readback in scripts.
+See [all commands and fade limits](docs/commands.md).
 
 Commands use the last-selected light profile. `cync` with no arguments shows its status when a profile is configured, or a setup hint with a link to help when no light is paired. Use `cync login` for a fresh setup; control commands can prompt for setup when no profile is configured.
 

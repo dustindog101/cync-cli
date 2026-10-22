@@ -43,6 +43,9 @@ class PackagingTests(unittest.TestCase):
             (root / "brightness-levels.json").write_text("{}")
             self.assertTrue(any("private-data filename" in item for item in module.audit(root)))
             (root / "brightness-levels.json").unlink()
+            (root / "fade-status.json").write_text("{}")
+            self.assertTrue(any("private-data filename" in item for item in module.audit(root)))
+            (root / "fade-status.json").unlink()
             (root / "source.py").write_text(
                 "api" + "_key = '" + "abcdefghijklmnopqrstuvwxyz" + "123456'\n"
             )

@@ -29,7 +29,7 @@ class CLIArgumentParser(argparse.ArgumentParser):
         values = list(sys.argv[1:] if args is None else args)
         self._json_requested = "--json" in values
         CLIArgumentParser._json_requested_global = self._json_requested
-        return super().parse_args(values, namespace)
+        return super().parse_args(_normalize_help(values), namespace)
 
     def error(self, message):
         if getattr(self, "_json_requested", False) or CLIArgumentParser._json_requested_global:
@@ -60,7 +60,7 @@ class CLIArgumentParser(argparse.ArgumentParser):
                 "  cync login               Import paired lights from your account\n\n"
                 "Examples: cync red 100 · cync '#33AAFF' · cync 35 · cync fade 70 8 · cync save Evening\n"
                 "More: toggle, scenes, brightness, color, rgb, set, info, scan, watch, doctor, test, disconnect, shutdown, devices, auth\n"
-                "Run `cync help` or `cync COMMAND --help` for advanced options.\n"
+                "Run `cync help` or `cync COMMAND help` for advanced options.\n"
             )
         return super().format_help()
 
@@ -106,7 +106,8 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--white")
     _add_output_options(p)
     p = sub.add_parser("fade", help="fade to a brightness over time")
-    p.add_argument("brightness", metavar="TARGET", help="brightness 0–100, on (previous brightness), or off (0)")
+    p.add_argument("brightness", metavar="TARGET", help="brightness 0–100, on (previous brightness), off (0), status, or cancel")
+    p.add_argument("--wait", action="store_true", help="wait for verified completion (default: return after the fade starts)")
     p.add_argument("duration_pos", nargs="?", type=_fade_duration, metavar="TIME",
                    help="0.2–600 seconds; accepts 60, 60s, or 1m (default: 2 seconds)")
     p.add_argument("--duration", dest="duration_flag", type=_fade_duration, metavar="TIME",
@@ -117,7 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--count", type=_positive_count, metavar="POLL_COUNT", help="stop after this many polls (default: run until interrupted)")
     _add_output_options(p)
     p = sub.add_parser("help", help="show help for cync commands")
-    p.add_argument("help_command", nargs="?", metavar="COMMAND", help="command to describe")
+    p.add_argument("help_command", nargs="*", metavar="COMMAND", help="command path to describe, such as scene save")
     _add_output_options(p)
     p = sub.add_parser("test", help="run a bounded control check and restore the starting state")
     p.add_argument("--brightness", type=parse_percent, default=23)
@@ -179,6 +180,70 @@ _ALIASES = {
 }
 
 
+def _normalize_help(argv: list[str]) -> list[str]:
+    """Accept COMMAND help at every parser depth without touching argument data."""
+    args = list(argv)
+    index = 0
+    while index < len(args):
+        if args[index] == "--device":
+            index += 2
+        elif args[index] == "--json" or args[index].startswith("--device="):
+            index += 1
+        else:
+            break
+    if index >= len(args) or args[index] == "help":
+        return args
+    # Walk commands, including aliases, before interpreting a bare help word.
+    parser = build_parser()
+    path = []
+    output_options = []
+    cursor = index
+    while cursor < len(args):
+        token = args[cursor]
+        if token == "--device" and cursor + 1 < len(args):
+            output_options += args[cursor:cursor + 2]
+            cursor += 2
+            continue
+        if token == "--json" or token.startswith("--device="):
+            output_options.append(token)
+            cursor += 1
+            continue
+        if token.startswith("-"):
+            option_name = token.split("=", 1)[0]
+            action = parser._option_string_actions.get(option_name)
+            if action is not None:
+                cursor += 1
+                if action.nargs != 0 and "=" not in token:
+                    cursor += 1
+                continue
+        if token == "help":
+            return args[:index] + output_options + ["help"] + path + args[cursor + 1:]
+        if path == ["fade"] and token in {"status", "cancel"}:
+            path.append(token)
+            cursor += 1
+            continue
+        action = next((a for a in parser._actions if isinstance(a, argparse._SubParsersAction)), None)
+        choices = getattr(action, "choices", {}) or {}
+        names = _ALIASES.get(token, [token]) if cursor == index else [token]
+        for name in names:
+            if name not in choices:
+                if cursor == index and cursor + 1 < len(args) and args[cursor + 1] == "help":
+                    if _numeric_token(token):
+                        return args[:index] + ["help", "brightness"] + args[cursor + 2:]
+                    try:
+                        parse_rgb(token)
+                    except ValueError:
+                        return args
+                    return args[:index] + ["help", "color"] + args[cursor + 2:]
+                return args
+            parser = choices[name]
+            path.append(name)
+            action = next((a for a in parser._actions if isinstance(a, argparse._SubParsersAction)), None)
+            choices = getattr(action, "choices", {}) or {}
+        cursor += 1
+    return args
+
+
 def _normalize_shortcuts(argv: list[str]) -> list[str]:
     """Expand short everyday words before argparse validates the full CLI."""
     args = list(argv)
@@ -198,7 +263,7 @@ def _normalize_shortcuts(argv: list[str]) -> list[str]:
     if token in _ALIASES:
         expanded = _ALIASES[token]
         return args[:index] + expanded + args[index + 1 :]
-    if token == "scene" and index + 1 < len(args) and args[index + 1] not in {"list", "save", "show", "apply", "delete"}:
+    if token == "scene" and index + 1 < len(args) and args[index + 1] not in {"list", "save", "show", "apply", "delete", "help", "--help", "-h"}:
         return args[:index] + ["scene", "apply"] + args[index + 1 :]
     known = {"status", "info", "on", "off", "toggle", "doctor", "disconnect", "shutdown", "scan", "brightness", "color", "rgb", "white", "set", "fade", "watch", "test", "help", "scene", "devices", "auth"}
     if token in known:
@@ -233,13 +298,19 @@ def _normalize_shortcuts(argv: list[str]) -> list[str]:
     return args[:index] + expanded
 
 
-def _help_text(topic: str | None = None) -> str:
+def _help_text(topic: str | list[str] | None = None) -> str:
     """Return the root help, or the help for one named command."""
     parser = build_parser()
     if not topic:
         return parser.format_help()
     # An alias such as "lights" points at a real command; describe that one.
-    for name in _ALIASES.get(topic, [topic]):
+    topics = [topic] if isinstance(topic, str) else list(topic)
+    path = _ALIASES.get(topics[0], [topics[0]]) + topics[1:]
+    if len(path) == 2 and path[0] == "fade" and path[1] in {"status", "cancel"}:
+        description = ("Show the latest fade operation and its verified endpoint or error."
+                       if path[1] == "status" else "Stop further fade writes and leave the last applied level.")
+        return f"usage: cync fade {path[1]} [--json]\n\n{description}\n"
+    for name in path:
         action = next((a for a in parser._actions if isinstance(a, argparse._SubParsersAction)), None)
         choices = getattr(action, "choices", {}) or {}
         if name not in choices:
@@ -353,7 +424,7 @@ def _result(command: str, *, device: dict[str, Any] | None = None, response: dic
     if device:
         result["device"] = {key: device[key] for key in ("id", "name", "mesh", "node", "mac") if key in device}
     if response:
-        for key in ("verified", "state", "info", "devices", "bluetooth_state", "authorization"):
+        for key in ("verified", "state", "info", "devices", "bluetooth_state", "authorization", "accepted", "operation_id", "operation"):
             if key in response:
                 result[key] = response[key]
     result.update(extra)
@@ -581,13 +652,24 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
         device = _device(args.device, auto_login=True)
         response = _request(command, device)
         return _result(command, device=device, response=response)
+    if command == "fade" and args.brightness in {"status", "cancel"}:
+        if args.duration_pos is not None or args.duration_flag is not None or args.wait:
+            raise CLIError("invalid_input", "fade status/cancel does not accept a duration or --wait")
+        response = _request("fade-" + args.brightness, require_verified=False)
+        return _result("fade " + args.brightness, response=response)
     native_command, values = _control_args(args)
     device = _device(args.device, auto_login=True)
-    # A fade must hold the request open for the whole ramp, plus the connect
-    # and verify overhead. The helper caps its own deadline, so the two must
+    # Native fade deadlines retain the full ramp plus connection/readback
+    # headroom; --wait uses that same budget for its caller. The helper caps its own deadline, so the two must
     # grow together: helper cap 700s = 600s ramp + 35s overhead + 65s slack.
     timeout = values["duration"] + 35 if native_command == "fade" else 35
-    response = _request(native_command, device, values, timeout=timeout)
+    background = native_command == "fade" and not args.wait
+    if background:
+        values["background"] = True
+    response = _request(native_command, device, values, timeout=timeout, require_verified=not background)
+    if background and (response.get("accepted") is not True or response.get("verified") is not False
+                       or not isinstance(response.get("operation_id"), str) or not response["operation_id"]):
+        raise CLIError("invalid_response", "The helper did not acknowledge starting the fade. Refresh the installed helper.")
     return _result(command, device=device, response=response, requested=values)
 
 
@@ -610,6 +692,20 @@ def _print_human(result: dict[str, Any]) -> None:
     command = result.get("command", "")
     if command == "help":
         print(result.get("help", ""), end="")
+        return
+    if result.get("accepted"):
+        print("Fade started. Use `cync fade status` to check or `cync fade cancel` to stop.")
+        return
+    if command in {"fade status", "fade cancel"}:
+        operation = result.get("operation")
+        if not isinstance(operation, dict):
+            print("No fade recorded.")
+        else:
+            print("Fade: " + str(operation.get("status", "unknown")))
+            if isinstance(operation.get("state"), dict):
+                print(_human_state(operation))
+            if isinstance(operation.get("error"), dict):
+                print(operation["error"].get("message", ""))
         return
     if "state" in result:
         print(_human_state(result))
@@ -696,7 +792,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     try:
         raw_argv = list(sys.argv[1:] if argv is None else argv)
-        args = parser.parse_args(_normalize_shortcuts(raw_argv))
+        args = parser.parse_args(_normalize_shortcuts(_normalize_help(raw_argv)))
         if not args.command:
             data = _config()
             if not data.get("devices"):

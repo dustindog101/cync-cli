@@ -76,9 +76,9 @@ Synthetic coverage establishes ten-minute scheduling and timeout configuration;
 a full ten-minute hardware fade has not been exercised. Endpoint readback does
 not prove every intermediate physical level or visual smoothness. Forced sleep,
 lid closure, deliberate mid-fade radio loss, and Ctrl-C cancellation were not
-hardware-tested. The CLI currently has no native cancellation/resume mechanism;
-an accepted fade can continue after its Python caller exits. Other commands wait
-behind the serialized client lock. These limits are documented in the
+hardware-tested. The October 20 build had no native cancellation/resume mechanism;
+an accepted fade can continue after its Python caller exits. In that build other commands waited
+behind the serialized client lock. The October 22 follow-up below replaces this lifecycle. These limits are documented in the
 [command reference](commands.md) and [development guide](development.md).
 
 ## Cadence and previous-brightness follow-up
@@ -120,3 +120,68 @@ Installed hardware verification of the final restore behavior:
 Cadence boundaries at five and ten minutes are covered by native tests; these
 longer hardware ramps were not repeated for this follow-up. Whole-percent bulb
 levels and possible power-on restoration flashes still limit visual smoothness.
+
+
+## Responsive commands follow-up — 2026-10-22
+
+The old client lock covered the entire fade. A new concurrency regression fails
+against the original backend because a status caller cannot finish while a fade
+caller waits; it passes after limiting the lock to ordinary mailbox publication.
+Waiting publishers sleep outside the lock. Urgent fade status/cancel and doctor
+requests use unique priority mailboxes consumed before queued ordinary commands.
+
+Fades now return an unverified start acknowledgement after fresh baseline/start.
+`--wait` retains verified foreground completion. The helper tracks the ramp
+separately from read-only observers and explicit white/RGB-only controls, so those
+operations can verify while brightness continues changing. Brightness, power, or
+another fade replaces the ramp. `fade status` reports its latest result and
+`fade cancel` stops it. Every command and nested action accepts trailing `help`,
+including aliases and options before help.
+
+Startup is capped at 35 seconds independently of ramp duration; foreground
+requests retain duration+35. Final readback, fresh per-ramp gates, restore memory,
+monotonic timing, original cadence, and cleanup remain enforced. Persistence
+failure cannot turn into completed status; restart marks an interrupted running
+operation failed. Explicit white/color while off fails promptly with `LIGHT_OFF`
+and preserves the healthy connection.
+
+Validation of this follow-up:
+
+- 65 Python tests passed. Native tests passed against production callbacks,
+  including acceptance/completion separation, same-device status and independent
+  tone verification during foreground fades, cancellation/supersession, ordinary
+  queuing, priority cancellation, startup bounds, successive final-readback gates,
+  persistence failure, restart recovery, physical device matching, and cleanup.
+- The production helper compiled targeting macOS 12 and its crypto self-test
+  returned `{"ok":true}`. Privacy audit and whitespace checks passed.
+- Installed CLI help and doctor worked. Installed Python CLI/backend and Swift
+  sources matched the checkout byte-for-byte. Doctor reported Bluetooth powered
+  on and authorization allowed.
+- With a warm connection, `fade 20 6s` acknowledged start in **0.575s**. Status
+  during the ramp returned fresh verified brightness in **0.662s**. `white 0`
+  verified tone 0 in **1.194s**, and the fade remained running. A brightness 12
+  control verified in **1.258s** and marked that fade cancelled.
+- `fade 15 0.6s --wait` verified 15% in **2.024s**; its operation record and an
+  independent status confirmed the endpoint. `fade off 0.6s --wait` verified off
+  in **1.989s**. Explicit cancellation returned in **0.240s**.
+- On the final installed source, `fade 20 4s` acknowledged in **0.754s**.
+  `color red` verified in **0.858s** while the ramp continued; a separate status
+  observed changing brightness in RGB mode. The background operation completed
+  with `verified: true` at 20%, and independent status confirmed 20% and red.
+- While off, `white 0` returned `LIGHT_OFF` in **0.668s**. The following status
+  verified off in **0.961s**, confirming that validation did not force a reconnect.
+- Both live runs restored the initial reported on state, brightness 6%, and white
+  tone 59 in `finally`, with independent verified status. No `Cync fade` process
+  activity assertion remained after completion/cancellation.
+
+Cold Bluetooth startup still varies: the original installed build took 4.83s for
+`white 0` after idle; the first rebuilt fade start took 11.53s, and a later cold
+status took 8.76s. An initial five-second startup assertion failed, and restoration
+succeeded; subsequent timing checks warmed the connection before measuring ramp
+responsiveness. Backgrounding removes ramp/queue waiting, not connection or
+fresh-readback latency. The helper still releases connections after 90 idle seconds.
+
+Hardware coverage here is short ramps and bounded interruption/control tests.
+Five-/ten-minute cadence remains synthetic coverage; no new full ten-minute radio
+run or visual smoothness measurement was performed. Whole-percent firmware levels
+can remain visible. CI status is separate from these local and installed checks.

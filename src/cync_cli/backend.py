@@ -137,38 +137,51 @@ def request(command: str, device: dict | None = None, values: dict | None = None
     executable = ensure_helper()
     runtime = data_home() / "runtime"
     _private_dir(runtime)
-    with _lock(runtime / "client.lock"):
-        request_id = str(uuid.uuid4())
-        response = runtime / ("response-" + request_id + ".json")
-        mailbox = runtime / "request.json"
-        # open reuses the installed app instance. State and credentials remain local.
+    request_id = str(uuid.uuid4())
+    response = runtime / ("response-" + request_id + ".json")
+    priority = command in {"fade-status", "fade-cancel", "doctor"}
+    mailbox = runtime / (f"priority-{request_id}.json" if priority else "request.json")
+    response_budget = min(timeout, 35) if command == "fade" and (values or {}).get("background") else timeout
+    deadline = time.monotonic() + response_budget + 3
+    try:
         launched = subprocess.run(["open", "-g", "-j", str(executable.parents[2]), "--args", "--runtime", str(runtime)],
                                   capture_output=True, timeout=10)
         if launched.returncode:
             raise BackendError("LAUNCH_FAILED", "Could not open the Bluetooth helper. Reinstall cync-cli and check macOS permissions.")
-        _atomic(mailbox, {"request_id": request_id, "command": command, "device": device,
-                          "values": values or {}, "timeout": timeout})
-        deadline = time.monotonic() + timeout + 3
-        try:
-            while time.monotonic() < deadline:
-                try:
-                    result = json.loads(response.read_text())
-                except (FileNotFoundError, json.JSONDecodeError):
-                    time.sleep(0.1)
-                    continue
-                if result.get("request_id") != request_id:
-                    raise BackendError("PROTOCOL_ERROR", "Helper returned an unrelated response.")
-                if not result.get("ok"):
-                    error = result.get("error", {})
-                    raise BackendError(error.get("code", "BLUETOOTH_FAILED"), error.get("message", "Bluetooth request failed."))
-                return result
-            raise BackendError("TIMEOUT", "Bluetooth helper did not respond. Allow macOS Bluetooth access and run cync doctor.")
-        finally:
-            response.unlink(missing_ok=True)
-            # Leave no unprocessed job that can run after the caller has given up.
-            if mailbox.is_file():
-                try:
-                    if json.loads(mailbox.read_text()).get("request_id") == request_id:
-                        mailbox.unlink()
-                except (OSError, ValueError):
-                    pass
+        payload = {"request_id": request_id, "command": command, "device": device,
+                   "values": values or {}, "timeout": timeout}
+        if priority:
+            # Unique urgent publications cannot be blocked by a queued ordinary command.
+            _atomic(mailbox, payload)
+        else:
+            while True:
+                # Never sleep with the publication lock held.
+                with _lock(runtime / "client.lock"):
+                    if not mailbox.exists():
+                        _atomic(mailbox, payload)
+                        break
+                if time.monotonic() >= deadline:
+                    raise BackendError("BUSY", "The helper has not accepted the previous request. Run cync doctor.")
+                time.sleep(0.1)
+        while time.monotonic() < deadline:
+            try:
+                result = json.loads(response.read_text())
+            except (FileNotFoundError, json.JSONDecodeError):
+                time.sleep(0.1)
+                continue
+            if result.get("request_id") != request_id:
+                raise BackendError("PROTOCOL_ERROR", "Helper returned an unrelated response.")
+            if not result.get("ok"):
+                error = result.get("error", {})
+                raise BackendError(error.get("code", "BLUETOOTH_FAILED"), error.get("message", "Bluetooth request failed."))
+            return result
+        raise BackendError("TIMEOUT", "Bluetooth helper did not respond. Allow macOS Bluetooth access and run cync doctor.")
+    finally:
+        response.unlink(missing_ok=True)
+        # The lock prevents a stale caller from removing a newer publication.
+        with _lock(runtime / "client.lock"):
+            try:
+                if json.loads(mailbox.read_text()).get("request_id") == request_id:
+                    mailbox.unlink()
+            except (OSError, ValueError):
+                pass

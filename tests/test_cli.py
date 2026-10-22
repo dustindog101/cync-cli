@@ -319,12 +319,61 @@ class CLITests(unittest.TestCase):
             calls.append((command, values, timeout))
             return {"schema_version": 1, "ok": True, "verified": True, "state": BASE_STATE}
         with patch.object(cli, "_device", return_value=DEVICE), patch.object(cli.backend, "request", side_effect=request):
-            cli.dispatch(cli.build_parser().parse_args(["fade", "30", "--duration", "20"]))
+            cli.dispatch(cli.build_parser().parse_args(["fade", "30", "--duration", "20", "--wait"]))
         self.assertEqual(calls, [("fade", {"brightness": 30, "duration": 20.0}, 55.0)])
         calls.clear()
         with patch.object(cli, "_device", return_value=DEVICE), patch.object(cli.backend, "request", side_effect=request):
-            cli.dispatch(cli.build_parser().parse_args(["fade", "30", "10m"]))
+            cli.dispatch(cli.build_parser().parse_args(["fade", "30", "10m", "--wait"]))
         self.assertEqual(calls, [("fade", {"brightness": 30, "duration": 600.0}, 635.0)])
+
+    def test_background_fade_requires_start_ack_without_claiming_verified_completion(self):
+        ack = {"schema_version": 1, "ok": True, "verified": False,
+               "accepted": True, "operation_id": "synthetic-operation"}
+        with patch.object(cli, "_device", return_value=DEVICE), patch.object(cli.backend, "request", return_value=ack) as request:
+            result = cli.dispatch(cli.build_parser().parse_args(["fade", "30", "20"]))
+        self.assertTrue(result["accepted"])
+        self.assertFalse(result["verified"])
+        self.assertNotIn("state", result)
+        self.assertEqual(request.call_args.kwargs["values"], {"brightness": 30, "duration": 20.0, "background": True})
+        self.assertEqual(request.call_args.kwargs["timeout"], 55)
+        with patch.object(cli, "_device", return_value=DEVICE), patch.object(cli.backend, "request", return_value={"schema_version": 1, "ok": True}):
+            with self.assertRaises(cli.CLIError):
+                cli.dispatch(cli.build_parser().parse_args(["fade", "30"]))
+
+    def test_fade_status_and_cancel_do_not_require_device_or_verified_endpoint(self):
+        for action in ("status", "cancel"):
+            with self.subTest(action=action), patch.object(cli, "_device", side_effect=AssertionError("device lookup")), patch.object(cli.backend, "request", return_value={"schema_version": 1, "ok": True, "operation": {"status": "cancelled"}}) as request:
+                result = cli.dispatch(cli.build_parser().parse_args(["fade", action]))
+                self.assertEqual(result["operation"]["status"], "cancelled")
+                self.assertEqual(request.call_args.args, ("fade-" + action,))
+        for argv in (["fade", "status", "1m"], ["fade", "cancel", "--wait"]):
+            with self.assertRaises(cli.CLIError):
+                cli.dispatch(cli.build_parser().parse_args(argv))
+
+    def test_trailing_help_for_every_command_and_nested_action_is_offline(self):
+        parser = cli.build_parser()
+        paths = []
+        def collect(current, prefix):
+            paths.append(prefix)
+            for action in current._actions:
+                if isinstance(action, cli.argparse._SubParsersAction):
+                    for name, child in action.choices.items():
+                        if name != "help":
+                            collect(child, prefix + [name])
+        collect(parser, [])
+        paths += [[name] for name in cli._ALIASES] + [["red"], ["35"], ["#33AAFF"], ["fade", "status"], ["fade", "cancel"], ["fade", "--json"], ["fade", "--wait"], ["fade", "--duration", "5s"], ["watch", "--count", "10"]]
+        for path in paths:
+            if not path:
+                continue
+            with self.subTest(path=path), patch.object(cli.backend, "request", side_effect=AssertionError("must be offline")), patch.object(cli, "_config", side_effect=AssertionError("must not read config")):
+                output = StringIO()
+                with redirect_stdout(output):
+                    self.assertEqual(cli.main(path + ["help"]), 0)
+                self.assertIn("usage: cync ", output.getvalue())
+        output = StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(cli.main(["--json", "scene", "save", "help"]), 0)
+        self.assertIn("scene save", json.loads(output.getvalue())["help"])
 
     def test_status_and_info_enable_interactive_first_use_login(self):
         response = {"schema_version": 1, "ok": True, "verified": True, "state": BASE_STATE, "info": {"type": 21}}

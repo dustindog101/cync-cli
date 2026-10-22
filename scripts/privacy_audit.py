@@ -12,7 +12,7 @@ EXCLUDED_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules"}
 PRIVATE_PATHS = (
     re.compile(r"(^|/)\.env(?:\..*)?$", re.I),
     re.compile(
-        r"(^|/)(?:config|scenes|devices|credentials|secrets|tokens|keychain|brightness-levels)"
+        r"(^|/)(?:config|scenes|devices|credentials|secrets|tokens|keychain|brightness-levels|fade-status)"
         r"(?:[-_.].*)?\.(?:json|jsonl|ya?ml|toml|plist|txt|csv)$",
         re.I,
     ),
