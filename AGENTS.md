@@ -27,6 +27,13 @@ Read [README.md](README.md), [the command reference](docs/commands.md), and
 - Brightness zero means off. Color shortcuts power on first; explicit color and
   white-level operations preserve power. Power-on must precede brightness writes
   because the bulb can restore its old brightness when turned on.
+- A background fade start is acceptance, not verified completion. Return
+  `accepted: true, verified: false, operation_id` only after baseline/start. Keep
+  `--wait` for verified final response, and report final results via `fade status`.
+  Serialize mailbox publication, never the whole caller wait. Same-light status
+  observers and explicit white/RGB-only controls must not stop the ramp;
+  brightness/power controls supersede it and invalidate delayed callbacks. Persist the latest operation privately; protect restore
+  brightness from intermediate observer reports.
 - A transmitted packet is not success. Control results require a fresh matching
   notification after the final write; keep RGB quantization tolerances.
 - Fade durations are 0.2–600 seconds (default 2). Maintain CLI validation,
